@@ -16,7 +16,7 @@ class CommunicationThread(QThread):
 
     def run(self):
         if not self.setup_connection():
-            return  # Exit the thread if connection setup fails
+            return
 
         try:
             while True:
@@ -29,7 +29,7 @@ class CommunicationThread(QThread):
                 elif self.mode == "spi":
                     data = self.com.transfer_spi_data([0x01])
                     self.received_signal.emit(f"Received SPI: {data[0]}")
-                self.sleep(0.1)
+                self.msleep(100)
         except Exception as e:
             self.error_signal.emit(f"Error in {self.mode} thread: {e}")
         finally:
@@ -95,13 +95,16 @@ class CommunicationApp(QMainWindow):
         self.button_serial = QPushButton("UTF-8 Serial", central_widget)
         self.button_i2c = QPushButton("I2C Communication", central_widget)
         self.button_spi = QPushButton("SPI Communication", central_widget)
+        self.button_clear = QPushButton("Clear Text", central_widget)  # Adding the clear button
         layout.addWidget(self.button_serial)
         layout.addWidget(self.button_i2c)
         layout.addWidget(self.button_spi)
+        layout.addWidget(self.button_clear)  # Adding the button to the layout
 
-        self.button_serial.clicked.connect(lambda: self.start_communication("serial", '/dev/tty.usbmodem11303', 115200))
+        self.button_serial.clicked.connect(lambda: self.start_communication("serial", 'COM3', 115200))
         self.button_i2c.clicked.connect(lambda: self.start_communication("i2c"))
         self.button_spi.clicked.connect(lambda: self.start_communication("spi"))
+        self.button_clear.clicked.connect(self.clear_display)  # Connecting the clear button
 
     def start_communication(self, mode, port=None, baudrate=None):
         self.com_thread = CommunicationThread(port, baudrate, mode)
@@ -111,6 +114,9 @@ class CommunicationApp(QMainWindow):
 
     def update_display(self, message):
         self.text_display.append(message)
+
+    def clear_display(self):
+        self.text_display.clear()  # Clears the text display
 
     def display_error(self, message):
         QMessageBox.critical(self, "Connection Error", message + "\n\nPlease check your connection settings and try again.")
