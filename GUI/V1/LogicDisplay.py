@@ -40,8 +40,8 @@ class LogicDisplay(QMainWindow):
         # Buffers for each channel to hold the logic signal values
         self.data_buffer = [[] for _ in range(self.channels)]
 
-        # Flags for visibility of each channel
-        self.channel_visibility = [True] * self.channels
+        # Flags for visibility of each channel (start in OFF state)
+        self.channel_visibility = [False] * self.channels
 
         self.setup_ui()
 
@@ -75,10 +75,15 @@ class LogicDisplay(QMainWindow):
         self.plot.setYRange(-2, 2 * self.channels, padding=0)  # Adjust Y range to fit all channels
         self.plot.showGrid(x=True, y=True)
 
+        # Remove numeric values from the y-axis and replace them with channel names
+        self.plot.getAxis('left').setTicks([[(i * 2, f'Channel {self.channels - i}') for i in range(self.channels)]])
+        self.plot.getAxis('left').setStyle(showValues=False)  # Hide the numeric values
+
         # Create curve objects for each channel
         self.curves = []
         for i in range(self.channels):
             curve = self.plot.plot(pen=pg.mkPen(color=pg.intColor(i, hues=16)))
+            curve.setVisible(False)  # Start with channels hidden
             self.curves.append(curve)
 
         # Layout for the toggle buttons (Channel 1 - Channel 8)
@@ -90,7 +95,7 @@ class LogicDisplay(QMainWindow):
         for i in range(self.channels):
             button = QPushButton(f"Channel {i+1}")
             button.setCheckable(True)
-            button.setChecked(True)  # Start with all channels visible
+            button.setChecked(False)  # Start with all channels off (unchecked)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel(idx, checked))
             button_layout.addWidget(button)
             self.channel_buttons.append(button)
@@ -99,6 +104,7 @@ class LogicDisplay(QMainWindow):
         self.toggle_button = QPushButton("Start")
         self.toggle_button.clicked.connect(self.toggle_reading)
         button_layout.addWidget(self.toggle_button)
+
 
     def toggle_channel(self, channel_idx, is_checked):
         """Toggles the visibility of a specific channel."""
