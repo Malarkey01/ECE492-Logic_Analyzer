@@ -30,13 +30,17 @@
 uint16_t buttonState = 0;
 #define BUFFER_SIZE 1024
 uint16_t buffer[BUFFER_SIZE];
+int bufferPointer = 0;
 uint8_t Buff[10];
 int trigger = 0;
 char msg[10];
-int check = 0;
+int samples = 0;
 int val = 0;
 int status = 0;
+uint16_t xorResult = 0;
 int trigcounter = 0;
+enum triggerStates{triggerState, postTrigger, preTrigger};
+enum triggerStates state;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -64,6 +68,8 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 //static void MX_TIM16_Init(void);
 static void MX_TIM1_Init(uint32_t prescaler, uint32_t period);
+//static void MX_TIM16_Init(void);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -107,7 +113,9 @@ int main(void)
   //MX_TIM16_Init();
   //MX_TIM1_Init();
   MX_TIM1_Init(0, 79);  // Initial setup for 1 MHz sampling rate
-  Start_TIM1_DMA();
+ // Start_TIM1_DMA();
+ // MX_TIM16_Init();
+
   /* USER CODE BEGIN 2 */
 //  HAL_TIM_Base_Start(&htim1);
 //  HAL_DMA_Start_IT(&hdma_tim1_up, (uint32_t)&GPIOB->IDR, (uint32_t)buffer, BUFFER_SIZE);
@@ -115,34 +123,44 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  state = preTrigger;
+
+  HAL_TIM_Base_Start_IT(&htim1);
+
+
   while (1)
   {
-	  if(n == 1024){
-		  n = 0;
-	  }
+//	  if(n == 1024){
+//		  n = 0;
+//	  }
 
 
-	  if(trigger == 1 ){
-		  val = n;
-
-		  status = 1;
-
-	  }
+//	  if(trigger == 1 ){
+//		  val = n;
+//
+//		  status = 1;
+//
+//	  }
 
     /* USER CODE END WHILE */
-	  if(trigger == 0 && status == 1){
-	  sprintf(msg, "%hu\r\n", buffer[val]);
-	  CDC_Transmit_FS((uint8_t *)msg, strlen(msg));
-	  HAL_Delay(100);
-	  val++;
+	  //if(trigger == 0 && status == 1){
+	  switch(state){
+	  	  case preTrigger:
+	  		  break;
+	  	  case triggerState:
+	  		  break;
+	  	  case postTrigger:
+	  		  trigger = 0;
+	  		  sprintf(msg, "%hu\r\n", buffer[val]);
+	  		  CDC_Transmit_FS((uint8_t *)msg, strlen(msg));
+	  		  HAL_Delay(2);
+	  		  val++;
 
-	  if(val == 1024){
-		  val = n;
-	  }
-	  }
-	  else{
-	  HAL_Delay(1);
-	  n++;
+	  		  if(val == 1024){
+	  			  val = 0;
+	  		  }
+	  		 HAL_TIM_Base_Start_IT(&htim1);
+	  		  break;
 	  }
     /* USER CODE BEGIN 3 */
   }
@@ -230,9 +248,9 @@ static void MX_TIM1_Init(uint32_t prescaler, uint32_t period)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = prescaler;
+  htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = period;
+  htim1.Init.Period = 1;   //3300-1;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -312,7 +330,7 @@ static void MX_TIM1_Init(uint32_t prescaler, uint32_t period)
 //  htim16.Instance = TIM16;
 //  htim16.Init.Prescaler = 72-1;
 //  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
-//  htim16.Init.Period = 1000-1;
+//  htim16.Init.Period = 6554-1;
 //  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
 //  htim16.Init.RepetitionCounter = 0;
 //  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -326,11 +344,56 @@ static void MX_TIM1_Init(uint32_t prescaler, uint32_t period)
 //
 //}
 
-
+uint16_t trigPin = 0x01;
+uint16_t trigEdge = 0x00; //rising edge
+int triggerCount = 128;
+int counter = 0;
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-    if (htim == &htim1) {
-        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);  // Toggle GPIO pin (assuming PA5 is used)
-    }
+		if (htim == &htim1) {
+			if (trigger){
+				counter ++;
+				if (counter == triggerCount){
+					state = postTrigger;
+					HAL_TIM_Base_Stop(&htim1);
+
+				}
+			}
+			else {
+				xorResult = GPIOB->IDR^buffer[bufferPointer];
+				if (xorResult & trigPin){
+					if(~(buffer[bufferPointer]^trigEdge)){
+						//checking for falling edge
+						if (~(trigEdge)){
+							if ((xorResult & trigPin) & (~(buffer[bufferPointer]^trigEdge))){
+								trigger = 1; counter = 0;
+								//change state
+								state = triggerState;
+								//HAL_TIM_Base_Start_IT(&htim16);
+							}
+						}
+						else{
+							trigger = 1; counter = 0;
+							state = triggerState;
+							//HAL_TIM_Base_Start_IT(&htim16);
+						}
+					}
+				}
+			}
+
+			//add value to buffer
+			buffer[bufferPointer] = GPIOB->IDR;
+			//FIXME: increment pointer with circular logic using logic gates
+			bufferPointer++;
+			if (bufferPointer > 1024){
+				bufferPointer = 0;
+			}
+		}
+		//trigger timer interrupt
+		if (htim == &htim16){
+			trigger = 0;
+			//push buffer to usb
+
+		}
 }
 
 
@@ -354,7 +417,12 @@ static void MX_DMA_Init(void)
       hdma_tim1_up.Init.Mode = DMA_CIRCULAR;
       hdma_tim1_up.Init.Priority = DMA_PRIORITY_LOW;
 
-      HAL_DMA_Init(&hdma_tim1_up);
+      //HAL_DMA_Init(&hdma_tim1_up);
+
+      if (HAL_DMA_Init(&hdma_tim1_up) != HAL_OK)
+          {
+              Error_Handler();
+          }
 
       __HAL_LINKDMA(&htim1, hdma[TIM_DMA_ID_UPDATE], hdma_tim1_up);
 
@@ -387,7 +455,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin : PA5 */
   GPIO_InitStruct.Pin = GPIO_PIN_5;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
@@ -413,8 +481,8 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 void Start_TIM1_DMA(void) {
-    HAL_TIM_Base_Start_IT(&htim1);
-    HAL_DMA_Start_IT(&hdma_tim1_up, (uint32_t)&GPIOB->IDR, (uint32_t)buffer, BUFFER_SIZE);
+    //HAL_TIM_Base_Start_IT(&htim1);
+    //HAL_DMA_Start_IT(&hdma_tim1_up, (uint32_t)&GPIOB->IDR, (uint32_t)buffer, BUFFER_SIZE);
 }
 
 void Stop_TIM1_DMA(void) {
@@ -424,7 +492,7 @@ void Stop_TIM1_DMA(void) {
 
 void Change_Sampling_Rate(uint32_t new_rate) {
     uint32_t prescaler = 0;  // Prescaler value set to 0 for high frequencies
-    uint32_t period = (80000000 / (prescaler + 1) / new_rate) - 1;
+    uint32_t period = (72000000 / (prescaler + 1) / new_rate) - 1;
 
     Stop_TIM1_DMA();
     MX_TIM1_Init(prescaler, period);
@@ -433,30 +501,10 @@ void Change_Sampling_Rate(uint32_t new_rate) {
 
 void Process_USB_Command(char *cmd) {
     uint32_t new_rate = atoi(cmd);  // Convert command string to integer
-    if (new_rate == 1) {
-    	check = 1;
-    	Change_Sampling_Rate(100000);
-        //Change_Sampling_Rate(new_rate);
-    }
-    else if(new_rate == 2){
-    	check = 2;
-    	Change_Sampling_Rate(200000);
-    }
-    else if(new_rate == 3){
-    	Change_Sampling_Rate(300000);
-    	check = 3;
-    }
-    else if(new_rate == 4){
-    	Change_Sampling_Rate(400000);
-    	check = 4;
-    }
 
-    else if(new_rate == 5){
-    	Change_Sampling_Rate(500000);
-    	check = 5;
-    }
 
-    else if(new_rate == 6){
+
+    if(new_rate == 6){
     	trigger = 1;
     }
     else if(new_rate ==7){
