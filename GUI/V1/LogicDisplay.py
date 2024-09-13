@@ -10,8 +10,12 @@ class SerialWorker(QThread):
 
     def __init__(self, port, baudrate):
         super().__init__()
-        self.serial = serial.Serial(port, baudrate)
-        self.is_running = True
+        self.is_running = True  # Ensure this is set first
+        try:
+            self.serial = serial.Serial(port, baudrate)
+        except serial.SerialException as e:
+            print(f"Failed to open serial port: {str(e)}")
+            self.is_running = False  # Set running flag to False if serial port can't be opened
 
     def run(self):
         while self.is_running:
@@ -25,6 +29,12 @@ class SerialWorker(QThread):
                     except ValueError:
                         continue
                 self.data_ready.emit(processed_data)
+
+    def stop_worker(self):
+        self.is_running = False
+        if self.serial.is_open:
+            self.serial.close()
+
 
     def stop_worker(self):
         self.is_running = False

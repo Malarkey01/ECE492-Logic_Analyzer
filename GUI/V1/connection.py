@@ -62,6 +62,13 @@ class SerialApp(QMainWindow):
             self.logic_display_window.show()
 
         except serial.SerialException as e:
+            if isinstance(e, PermissionError):
+                print(f"Failed to connect to {port_name}: {str(e)}. The port is in use or permission is denied.")
+            else:
+                print(f"Failed to connect to {port_name}: {str(e)}")
+
+
+        except serial.SerialException as e:
             print(f"Failed to connect to {port_name}: {str(e)}")
 
     def disconnect_device(self):
