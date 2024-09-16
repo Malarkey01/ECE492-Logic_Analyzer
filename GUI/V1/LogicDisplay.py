@@ -91,7 +91,7 @@ class LogicDisplay(QMainWindow):
         self.data_buffer = [[] for _ in range(self.channels)]
 
         # Flags for visibility of each channel
-        self.channel_visibility = [True] * self.channels
+        self.channel_visibility = [False] * self.channels  # Start with all channels not visible
 
         self.setup_ui()
 
@@ -121,7 +121,7 @@ class LogicDisplay(QMainWindow):
 
         # Use the custom FixedYViewBox here
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
-        # self.plot.setTitle("Logic Signals") # Title on the graph
+        # self.plot.setTitle("Logic Signals")
 
         # Set fixed Y range and disable auto-scaling on Y-axis
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
@@ -129,7 +129,7 @@ class LogicDisplay(QMainWindow):
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
 
-        # **Hide the y-axis labels and line**
+        # Hide the y-axis labels and line
         self.plot.getAxis('left').setTicks([])  # Remove y-axis ticks
         self.plot.getAxis('left').setStyle(showValues=False)  # Hide y-axis labels
         self.plot.getAxis('left').setPen(None)  # Remove y-axis line
@@ -138,6 +138,7 @@ class LogicDisplay(QMainWindow):
         self.curves = []
         for i in range(self.channels):
             curve = self.plot.plot(pen=pg.mkPen(color=pg.intColor(i, hues=16)))
+            curve.setVisible(self.channel_visibility[i])  # Set initial visibility
             self.curves.append(curve)
 
         # Layout for the toggle buttons (Channel 1 - Channel 8)
@@ -149,7 +150,7 @@ class LogicDisplay(QMainWindow):
         for i in range(self.channels):
             button = QPushButton(f"Channel {i+1}")
             button.setCheckable(True)
-            button.setChecked(True)  # Start with all channels visible
+            button.setChecked(False)  # Start with all channels not visible
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel(idx, checked))
             button_layout.addWidget(button)
             self.channel_buttons.append(button)
@@ -158,7 +159,6 @@ class LogicDisplay(QMainWindow):
         self.toggle_button = QPushButton("Start")
         self.toggle_button.clicked.connect(self.toggle_reading)
         button_layout.addWidget(self.toggle_button)
-
 
     def toggle_channel(self, channel_idx, is_checked):
         """Toggles the visibility of a specific channel."""
