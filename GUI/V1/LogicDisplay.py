@@ -3,6 +3,7 @@ import serial
 from PyQt6.QtWidgets import QApplication, QMainWindow, QGridLayout, QPushButton, QWidget, QVBoxLayout, QHBoxLayout
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal
 import pyqtgraph as pg
+from pyqtgraph import ViewBox
 import numpy as np
 
 class SerialWorker(QThread):
@@ -34,6 +35,50 @@ class SerialWorker(QThread):
         self.is_running = False
         if self.serial.is_open:
             self.serial.close()
+            
+class FixedYViewBox(pg.ViewBox):
+    def __init__(self, *args, **kwargs):
+        super(FixedYViewBox, self).__init__(*args, **kwargs)
+
+    def scaleBy(self, s=None, center=None, x=None, y=None):
+        # Lock the y-axis scale by setting y-scale factor to 1.0
+        y = 1.0  # Override y scaling
+
+        # Determine the x scaling factor
+        if x is not None:
+            pass  # Use the provided x value
+        else:
+            if s is None:
+                x = 1.0
+            elif isinstance(s, dict):
+                x = s.get('x', 1.0)
+            elif isinstance(s, (list, tuple)):
+                x = s[0]  # Use the x scaling factor from the list
+            else:
+                x = s  # s is a scalar
+
+        # Call the superclass method with the adjusted x and y scaling factors
+        super(FixedYViewBox, self).scaleBy(x=x, y=y, center=center)
+
+    def translateBy(self, t=None, x=None, y=None):
+        # Lock the y-axis panning by setting y translation to 0.0
+        y = 0.0  # Override y translation
+
+        # Determine the x translation
+        if x is not None:
+            pass  # Use the provided x value
+        else:
+            if t is None:
+                x = 0.0
+            elif isinstance(t, dict):
+                x = t.get('x', 0.0)
+            elif isinstance(t, (list, tuple)):
+                x = t[0]  # Use the x translation from the list
+            else:
+                x = t  # t is a scalar
+
+        # Call the superclass method with the adjusted x and y translation values
+        super(FixedYViewBox, self).translateBy(x=x, y=y)
 
 class LogicDisplay(QMainWindow):
     def __init__(self, port, baudrate, channels=8):
@@ -74,10 +119,14 @@ class LogicDisplay(QMainWindow):
         self.graph_layout = pg.GraphicsLayoutWidget()
         main_layout.addWidget(self.graph_layout)
 
-        # Create a single plot widget for all channels
-        self.plot = self.graph_layout.addPlot()
+        # Use the custom FixedYViewBox here
+        self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
         self.plot.setTitle("Logic Signals")
-        self.plot.setYRange(-2, 2 * self.channels, padding=0)  # Adjust Y range to fit all channels
+
+        # Set fixed Y range and disable auto-scaling on Y-axis
+        self.plot.setYRange(-2, 2 * self.channels, padding=0)
+        self.plot.enableAutoRange(axis=pg.ViewBox.XAxis)
+        self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
 
         # Create curve objects for each channel
