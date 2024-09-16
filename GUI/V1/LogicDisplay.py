@@ -35,11 +35,6 @@ class SerialWorker(QThread):
         if self.serial.is_open:
             self.serial.close()
 
-
-    def stop_worker(self):
-        self.is_running = False
-        self.serial.close()
-
 class LogicDisplay(QMainWindow):
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
@@ -175,4 +170,5 @@ class LogicDisplay(QMainWindow):
     def closeEvent(self, event):
         self.worker.stop_worker()  # Stop the worker when the window is closed
         self.worker.quit()
+        self.worker.wait()  # Wait for the thread to finish
         event.accept()

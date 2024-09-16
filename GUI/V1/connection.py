@@ -1,5 +1,4 @@
 import sys
-import serial
 import serial.tools.list_ports
 from PyQt6.QtWidgets import QMainWindow, QPushButton, QVBoxLayout, QWidget, QComboBox
 from LogicDisplay import LogicDisplay  # Make sure this is the correct file name
@@ -8,7 +7,6 @@ class SerialApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Serial Connection Manager")
-        self.ser = None  # Serial port instance
         self.logic_display_window = None  # Reference to LogicDisplay window
         self.initUI()
 
@@ -48,7 +46,6 @@ class SerialApp(QMainWindow):
     def connect_device(self):
         port_name = self.combo_ports.currentText()
         try:
-            self.ser = serial.Serial(port_name, 115200, timeout=1)
             self.button_connect.setEnabled(False)
             self.button_disconnect.setEnabled(True)
             print(f"Connected to {port_name}")
@@ -58,28 +55,18 @@ class SerialApp(QMainWindow):
                 self.logic_display_window.close()
 
             # Create a new LogicDisplay window
-            self.logic_display_window = LogicDisplay(port=port_name, baudrate=250000, channels=8)
+            self.logic_display_window = LogicDisplay(port=port_name, baudrate=115200, channels=8)
             self.logic_display_window.show()
 
-        except serial.SerialException as e:
-            if isinstance(e, PermissionError):
-                print(f"Failed to connect to {port_name}: {str(e)}. The port is in use or permission is denied.")
-            else:
-                print(f"Failed to connect to {port_name}: {str(e)}")
-
-
-        except serial.SerialException as e:
+        except Exception as e:
             print(f"Failed to connect to {port_name}: {str(e)}")
 
     def disconnect_device(self):
-        if self.ser and self.ser.is_open:
-            self.ser.close()
+        # Close the LogicDisplay window when disconnecting the device
+        if self.logic_display_window:
+            self.logic_display_window.close()
+            self.logic_display_window = None  # Reset the reference
 
-            # Close the LogicDisplay window when disconnecting the device
-            if self.logic_display_window:
-                self.logic_display_window.close()
-                self.logic_display_window = None  # Reset the reference
-
-            self.button_connect.setEnabled(True)
-            self.button_disconnect.setEnabled(False)
-            print("Disconnected")
+        self.button_connect.setEnabled(True)
+        self.button_disconnect.setEnabled(False)
+        print("Disconnected")
