@@ -121,13 +121,18 @@ class LogicDisplay(QMainWindow):
 
         # Use the custom FixedYViewBox here
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
-        self.plot.setTitle("Logic Signals")
+        # self.plot.setTitle("Logic Signals") # Title on the graph
 
         # Set fixed Y range and disable auto-scaling on Y-axis
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
+
+        # **Hide the y-axis labels and line**
+        self.plot.getAxis('left').setTicks([])  # Remove y-axis ticks
+        self.plot.getAxis('left').setStyle(showValues=False)  # Hide y-axis labels
+        self.plot.getAxis('left').setPen(None)  # Remove y-axis line
 
         # Create curve objects for each channel
         self.curves = []
@@ -153,6 +158,7 @@ class LogicDisplay(QMainWindow):
         self.toggle_button = QPushButton("Start")
         self.toggle_button.clicked.connect(self.toggle_reading)
         button_layout.addWidget(self.toggle_button)
+
 
     def toggle_channel(self, channel_idx, is_checked):
         """Toggles the visibility of a specific channel."""
