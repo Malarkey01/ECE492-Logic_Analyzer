@@ -6,14 +6,15 @@ from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QMenu,
     QInputDialog,
+    QMenu,
     QPushButton,
 )
+from PyQt6.QtGui import QIcon
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 import pyqtgraph as pg
-from aesthetic import get_icon
 import numpy as np
+from aesthetic import get_icon
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -106,7 +107,8 @@ class LogicDisplay(QMainWindow):
         self.port = port
         self.baudrate = baudrate
         self.channels = channels
-        
+
+        self.setWindowTitle("Logic Analyzer")
         self.setWindowIcon(get_icon())
 
         self.data_buffer = [[] for _ in range(self.channels)]
@@ -144,9 +146,13 @@ class LogicDisplay(QMainWindow):
         self.plot.getAxis('left').setStyle(showValues=False)
         self.plot.getAxis('left').setPen(None)
 
+        # Define the custom colors for the channels
+        self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
+
         self.curves = []
         for i in range(self.channels):
-            curve = self.plot.plot(pen=pg.mkPen(color=pg.intColor(i, hues=16)))
+            color = self.colors[i % len(self.colors)]
+            curve = self.plot.plot(pen=pg.mkPen(color=color, width=4))  # Change width to make lines thicker/thinner
             curve.setVisible(self.channel_visibility[i])
             self.curves.append(curve)
 
@@ -160,6 +166,9 @@ class LogicDisplay(QMainWindow):
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel(idx, checked))
+            # Set the channel color property
+            color = self.colors[i % len(self.colors)]
+            button.setProperty('channelColor', color)
             button_layout.addWidget(button)
             self.channel_buttons.append(button)
 
@@ -167,9 +176,32 @@ class LogicDisplay(QMainWindow):
         self.toggle_button.clicked.connect(self.toggle_reading)
         button_layout.addWidget(self.toggle_button)
 
+    def is_light_color(self, hex_color):
+        """
+        Determines if a hex color is light or dark.
+        Returns True if the color is light, False if dark.
+        """
+        hex_color = hex_color.lstrip('#')
+        r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return luminance > 0.5
+
     def toggle_channel(self, channel_idx, is_checked):
         self.channel_visibility[channel_idx] = is_checked
         self.curves[channel_idx].setVisible(is_checked)
+
+        # Update button background color
+        button = self.channel_buttons[channel_idx]
+        if is_checked:
+            color = self.colors[channel_idx % len(self.colors)]
+            # Decide text color based on background color brightness
+            text_color = 'black' if self.is_light_color(color) else 'white'
+            # Set the button style
+            button.setStyleSheet(f"QPushButton {{ background-color: {color}; color: {text_color}; "
+                                 f"border: 1px solid #555; border-radius: 5px; padding: 5px; }}")
+        else:
+            # Reset to default style
+            button.setStyleSheet("")
 
     def toggle_reading(self):
         if self.is_reading:
@@ -222,3 +254,4 @@ class LogicDisplay(QMainWindow):
         self.worker.quit()
         self.worker.wait()
         event.accept()
+        
