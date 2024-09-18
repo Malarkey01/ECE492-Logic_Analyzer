@@ -1,12 +1,14 @@
 import sys
 import serial.tools.list_ports
 from PyQt6.QtWidgets import QMainWindow, QPushButton, QVBoxLayout, QWidget, QComboBox
+from aesthetic import get_icon
 from LogicDisplay import LogicDisplay  # Make sure this is the correct file name
 
 class SerialApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Serial Connection Manager")
+        self.setWindowIcon(get_icon())
         self.logic_display_window = None  # Reference to LogicDisplay window
         self.initUI()
 
