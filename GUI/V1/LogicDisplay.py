@@ -23,8 +23,7 @@ class SerialWorker(QThread):
         super().__init__()
         self.is_running = True
         try:
-            self.serial = serial.Serial(port, baudrate, timeout=0)
-            self.serial.reset_input_buffer()  # Clear the input buffer
+            self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
             print(f"Failed to open serial port: {str(e)}")
             self.is_running = False
@@ -32,15 +31,15 @@ class SerialWorker(QThread):
     def run(self):
         while self.is_running:
             if self.serial.in_waiting:
-                data = self.serial.read(self.serial.in_waiting)
-                decoded_data = data.decode('utf-8', errors='ignore')
+                data = self.serial.read(self.serial.in_waiting).splitlines()
                 processed_data = []
-                for char in decoded_data:
-                    if char in ('0', '1'):
-                        data_value = int(char)
+                for line in data:
+                    try:
+                        data_value = int(line.strip())
                         processed_data.append(data_value)
-                if processed_data:
-                    self.data_ready.emit(processed_data)
+                    except ValueError:
+                        continue
+                self.data_ready.emit(processed_data)
 
     def stop_worker(self):
         self.is_running = False
@@ -103,7 +102,7 @@ class EditableButton(QPushButton):
             self.setText(self.default_label)
 
 class LogicDisplay(QMainWindow):
-    def __init__(self, port, baudrate, channels=1):
+    def __init__(self, port, baudrate, channels=8):
         super().__init__()
         self.port = port
         self.baudrate = baudrate
@@ -153,7 +152,7 @@ class LogicDisplay(QMainWindow):
         self.curves = []
         for i in range(self.channels):
             color = self.colors[i % len(self.colors)]
-            curve = self.plot.plot(pen=pg.mkPen(color=color, width=2))  # Adjust width as needed
+            curve = self.plot.plot(pen=pg.mkPen(color=color, width=4))  # Change width to make lines thicker/thinner
             curve.setVisible(self.channel_visibility[i])
             self.curves.append(curve)
 
@@ -215,7 +214,7 @@ class LogicDisplay(QMainWindow):
     def start_reading(self):
         if not self.is_reading:
             self.is_reading = True
-            self.timer.start(10)  # Adjust the timer interval as needed
+            self.timer.start(1)
 
     def stop_reading(self):
         if self.is_reading:
@@ -225,22 +224,34 @@ class LogicDisplay(QMainWindow):
     def handle_data(self, data_list):
         if self.is_reading:
             for data_value in data_list:
-                # Since we are dealing with a single bit, assign it to channel 0
-                channel_idx = 0
-                self.data_buffer[channel_idx].append(data_value)
-                if len(self.data_buffer[channel_idx]) > 600:
-                    self.data_buffer[channel_idx].pop(0)
+                for i in range(self.channels):
+                    bit_value = (data_value >> i) & 1
+                    self.data_buffer[i].append(bit_value)
+                    if len(self.data_buffer[i]) > 600:
+                        self.data_buffer[i].pop(0)
 
     def update_plot(self):
         for i in range(self.channels):
             if self.channel_visibility[i]:
+                inverted_index = self.channels - i - 1
                 t = np.arange(len(self.data_buffer[i]))
                 if len(t) > 1:
-                    y = np.array(self.data_buffer[i]) + (self.channels - i - 1) * 2
-                    self.curves[i].setData(t, y)
+                    square_wave_time = []
+                    square_wave_data = []
+                    for j in range(1, len(t)):
+                        square_wave_time.extend([t[j-1], t[j]])
+                        square_wave_data.extend([
+                            self.data_buffer[i][j-1] + inverted_index * 2,
+                            self.data_buffer[i][j-1] + inverted_index * 2,
+                        ])
+                        if self.data_buffer[i][j] != self.data_buffer[i][j-1]:
+                            square_wave_time.append(t[j])
+                            square_wave_data.append(self.data_buffer[i][j] + inverted_index * 2)
+                    self.curves[i].setData(square_wave_time, square_wave_data)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
         self.worker.quit()
         self.worker.wait()
         event.accept()
+        
