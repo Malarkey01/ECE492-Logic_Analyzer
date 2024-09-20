@@ -2,7 +2,7 @@ import sys
 import serial.tools.list_ports
 from PyQt6.QtWidgets import QMainWindow, QPushButton, QVBoxLayout, QWidget, QComboBox
 from aesthetic import get_icon
-from LogicDisplay import LogicDisplay  # Make sure this is the correct file name
+from LogicDisplay import LogicDisplay  # Ensure this is the correct file name
 
 class SerialApp(QMainWindow):
     def __init__(self):
@@ -57,7 +57,7 @@ class SerialApp(QMainWindow):
                 self.logic_display_window.close()
 
             # Create a new LogicDisplay window
-            self.logic_display_window = LogicDisplay(port=port_name, baudrate=115200, channels=8)
+            self.logic_display_window = LogicDisplay(port=port_name, baudrate=115200, channels=1)  # Set channels to 1
             self.logic_display_window.show()
 
         except Exception as e:
