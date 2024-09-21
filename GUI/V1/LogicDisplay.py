@@ -9,14 +9,12 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QMenu,
     QPushButton,
-    QLabel,
 )
 from PyQt6.QtGui import QIcon
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 import pyqtgraph as pg
 import numpy as np
 from aesthetic import get_icon
-from functools import partial
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -113,20 +111,8 @@ class LogicDisplay(QMainWindow):
         self.setWindowTitle("Logic Analyzer")
         self.setWindowIcon(get_icon())
 
-        # Initialize data buffers
         self.data_buffer = [[] for _ in range(self.channels)]
         self.channel_visibility = [False] * self.channels
-
-        # Trigger-related attributes
-        self.trigger_channel = None  # No default trigger channel
-        self.trigger_conditions = {}  # Store trigger conditions for each channel
-        for i in range(self.channels):
-            self.trigger_conditions[i] = 'Rising'  # Default to Rising Edge
-        self.triggered = False
-        self.pre_trigger_buffer = [[] for _ in range(self.channels)]
-        self.post_trigger_buffer = [[] for _ in range(self.channels)]
-        self.post_trigger_samples = 600  # Number of samples to collect after trigger
-        self.post_trigger_count = 0
 
         self.setup_ui()
 
@@ -166,7 +152,7 @@ class LogicDisplay(QMainWindow):
         self.curves = []
         for i in range(self.channels):
             color = self.colors[i % len(self.colors)]
-            curve = self.plot.plot(pen=pg.mkPen(color=color, width=4))
+            curve = self.plot.plot(pen=pg.mkPen(color=color, width=4))  # Change width to make lines thicker/thinner
             curve.setVisible(self.channel_visibility[i])
             self.curves.append(curve)
 
@@ -174,33 +160,27 @@ class LogicDisplay(QMainWindow):
         main_layout.addLayout(button_layout)
 
         self.channel_buttons = []
-        self.trigger_buttons = []
-
         for i in range(self.channels):
-            channel_layout = QHBoxLayout()
             label = f"DIO {i+1}"
             button = EditableButton(label)
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel(idx, checked))
-
-            # Trigger button
-            trigger_button = QPushButton(self.trigger_conditions[i])
-            trigger_button.clicked.connect(partial(self.toggle_trigger, channel_idx=i))
-
-            channel_layout.addWidget(button)
-            channel_layout.addWidget(trigger_button)
-            button_layout.addLayout(channel_layout)
-
-            # Store buttons for reference
+            # Set the channel color property
+            color = self.colors[i % len(self.colors)]
+            button.setProperty('channelColor', color)
+            button_layout.addWidget(button)
             self.channel_buttons.append(button)
-            self.trigger_buttons.append(trigger_button)
 
         self.toggle_button = QPushButton("Start")
         self.toggle_button.clicked.connect(self.toggle_reading)
         button_layout.addWidget(self.toggle_button)
 
     def is_light_color(self, hex_color):
+        """
+        Determines if a hex color is light or dark.
+        Returns True if the color is light, False if dark.
+        """
         hex_color = hex_color.lstrip('#')
         r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
         luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
@@ -214,36 +194,14 @@ class LogicDisplay(QMainWindow):
         button = self.channel_buttons[channel_idx]
         if is_checked:
             color = self.colors[channel_idx % len(self.colors)]
+            # Decide text color based on background color brightness
             text_color = 'black' if self.is_light_color(color) else 'white'
+            # Set the button style
             button.setStyleSheet(f"QPushButton {{ background-color: {color}; color: {text_color}; "
                                  f"border: 1px solid #555; border-radius: 5px; padding: 5px; }}")
         else:
+            # Reset to default style
             button.setStyleSheet("")
-
-    def toggle_trigger(self, channel_idx):
-        # Toggle the trigger condition
-        current_condition = self.trigger_conditions[channel_idx]
-        if current_condition == 'Rising':
-            self.trigger_conditions[channel_idx] = 'Falling'
-        else:
-            self.trigger_conditions[channel_idx] = 'Rising'
-
-        # Update the button text
-        button = self.trigger_buttons[channel_idx]
-        button.setText(self.trigger_conditions[channel_idx])
-
-        # Set this channel as the trigger channel
-        previous_trigger_channel = self.trigger_channel
-        self.trigger_channel = channel_idx
-
-        # Update the trigger button appearance
-        for idx, trig_button in enumerate(self.trigger_buttons):
-            if idx == channel_idx:
-                # Highlight the selected trigger channel
-                trig_button.setStyleSheet("QPushButton { background-color: #FFD700; }")
-            else:
-                # Reset other buttons
-                trig_button.setStyleSheet("")
 
     def toggle_reading(self):
         if self.is_reading:
@@ -256,17 +214,6 @@ class LogicDisplay(QMainWindow):
     def start_reading(self):
         if not self.is_reading:
             self.is_reading = True
-            self.triggered = False
-            self.post_trigger_count = 0
-            self.pre_trigger_buffer = [[] for _ in range(self.channels)]
-            self.post_trigger_buffer = [[] for _ in range(self.channels)]
-            self.data_buffer = [[] for _ in range(self.channels)]
-            # Clear the plot
-            for curve in self.curves:
-                curve.clear()
-            if hasattr(self, 'trigger_line'):
-                self.plot.removeItem(self.trigger_line)
-                del self.trigger_line
             self.timer.start(1)
 
     def stop_reading(self):
@@ -274,82 +221,37 @@ class LogicDisplay(QMainWindow):
             self.is_reading = False
             self.timer.stop()
 
-    def rising_edge_trigger(self, previous_value, current_value):
-        return previous_value == 0 and current_value == 1
-
-    def falling_edge_trigger(self, previous_value, current_value):
-        return previous_value == 1 and current_value == 0
-
     def handle_data(self, data_list):
-        for data_value in data_list:
-            channel_values = []
-            for i in range(self.channels):
-                bit_value = (data_value >> i) & 1
-                channel_values.append(bit_value)
-
-            if not self.triggered:
-                # Append to pre-trigger buffers
+        if self.is_reading:
+            for data_value in data_list:
                 for i in range(self.channels):
-                    self.pre_trigger_buffer[i].append(channel_values[i])
-                    # Limit pre-trigger buffer size
-                    if len(self.pre_trigger_buffer[i]) > 600:
-                        self.pre_trigger_buffer[i].pop(0)
-
-                # Check trigger condition on the trigger channel
-                if self.trigger_channel is not None and len(self.pre_trigger_buffer[self.trigger_channel]) >= 2:
-                    prev_value = self.pre_trigger_buffer[self.trigger_channel][-2]
-                    curr_value = self.pre_trigger_buffer[self.trigger_channel][-1]
-                    condition = self.trigger_conditions[self.trigger_channel]
-                    if condition == 'Rising' and prev_value == 0 and curr_value == 1:
-                        self.triggered = True
-                        print("Trigger occurred!")
-                    elif condition == 'Falling' and prev_value == 1 and curr_value == 0:
-                        self.triggered = True
-                        print("Trigger occurred!")
-            else:
-                # Collect post-trigger data
-                for i in range(self.channels):
-                    self.post_trigger_buffer[i].append(channel_values[i])
-                self.post_trigger_count += 1
-
-                # Check if enough post-trigger data has been collected
-                if self.post_trigger_count >= self.post_trigger_samples:
-                    # Combine pre-trigger and post-trigger buffers
-                    for i in range(self.channels):
-                        self.data_buffer[i] = self.pre_trigger_buffer[i] + self.post_trigger_buffer[i]
-                    # Stop data acquisition
-                    self.stop_reading()
+                    bit_value = (data_value >> i) & 1
+                    self.data_buffer[i].append(bit_value)
+                    if len(self.data_buffer[i]) > 600:
+                        self.data_buffer[i].pop(0)
 
     def update_plot(self):
-        if self.triggered:
-            for i in range(self.channels):
-                if self.channel_visibility[i]:
-                    inverted_index = self.channels - i - 1
-                    t = np.arange(len(self.data_buffer[i]))
-                    if len(t) > 1:
-                        square_wave_time = []
-                        square_wave_data = []
-                        for j in range(1, len(t)):
-                            square_wave_time.extend([t[j-1], t[j]])
-                            square_wave_data.extend([
-                                self.data_buffer[i][j-1] + inverted_index * 2,
-                                self.data_buffer[i][j-1] + inverted_index * 2,
-                            ])
-                            if self.data_buffer[i][j] != self.data_buffer[i][j-1]:
-                                square_wave_time.append(t[j])
-                                square_wave_data.append(self.data_buffer[i][j] + inverted_index * 2)
-                        self.curves[i].setData(square_wave_time, square_wave_data)
-            # Add a vertical line at the trigger point
-            trigger_position = len(self.pre_trigger_buffer[0])
-            if not hasattr(self, 'trigger_line'):
-                self.trigger_line = pg.InfiniteLine(pos=trigger_position, angle=90, pen=pg.mkPen('r', width=2))
-                self.plot.addItem(self.trigger_line)
-        else:
-            # Optionally, display pre-trigger data or a message
-            pass
+        for i in range(self.channels):
+            if self.channel_visibility[i]:
+                inverted_index = self.channels - i - 1
+                t = np.arange(len(self.data_buffer[i]))
+                if len(t) > 1:
+                    square_wave_time = []
+                    square_wave_data = []
+                    for j in range(1, len(t)):
+                        square_wave_time.extend([t[j-1], t[j]])
+                        square_wave_data.extend([
+                            self.data_buffer[i][j-1] + inverted_index * 2,
+                            self.data_buffer[i][j-1] + inverted_index * 2,
+                        ])
+                        if self.data_buffer[i][j] != self.data_buffer[i][j-1]:
+                            square_wave_time.append(t[j])
+                            square_wave_data.append(self.data_buffer[i][j] + inverted_index * 2)
+                    self.curves[i].setData(square_wave_time, square_wave_data)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
         self.worker.quit()
         self.worker.wait()
         event.accept()
+        
