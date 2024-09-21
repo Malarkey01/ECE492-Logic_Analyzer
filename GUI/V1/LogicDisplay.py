@@ -47,8 +47,19 @@ class SerialWorker(QThread):
             self.serial.close()
 
 class FixedYViewBox(pg.ViewBox):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, parent=None, *args, **kwargs):
         super(FixedYViewBox, self).__init__(*args, **kwargs)
+        self.parent = parent
+
+    def mouseClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.pos()
+            x = self.mapSceneToView(pos).x()
+            if self.parent:
+                self.parent.cursor_line.setPos(x)
+            event.accept()
+        else:
+            event.ignore()
 
     def scaleBy(self, s=None, center=None, x=None, y=None):
         y = 1.0
@@ -135,7 +146,22 @@ class LogicDisplay(QMainWindow):
         self.graph_layout = pg.GraphicsLayoutWidget()
         main_layout.addWidget(self.graph_layout)
 
-        self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
+        # Pass 'self' to FixedYViewBox
+        self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox(parent=self))
+
+        self.plot.setYRange(-2, 2 * self.channels, padding=0)
+        self.plot.enableAutoRange(axis=pg.ViewBox.XAxis)
+        self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
+        self.plot.showGrid(x=True, y=True)
+
+        self.plot.getAxis('left').setTicks([])
+        self.plot.getAxis('left').setStyle(showValues=False)
+        self.plot.getAxis('left').setPen(None)
+
+        # Create the vertical cursor line
+        self.cursor_line = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen('r', width=2))
+        self.cursor_line.setLabel('x={value:0.2f}', position=0.9, color=(200, 200, 100), movable=True)
+        self.plot.addItem(self.cursor_line)
 
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis)
