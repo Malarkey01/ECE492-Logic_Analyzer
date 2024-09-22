@@ -218,6 +218,18 @@ class LogicDisplay(QMainWindow):
         self.toggle_button.clicked.connect(self.toggle_reading)
         button_layout.addWidget(self.toggle_button, self.channels, 0, 1, 2)  # Span two columns
 
+         # Adding a movable vertical cursor
+        self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
+        self.plot.addItem(self.cursor)
+
+        # Label to display cursor position
+        self.cursor_label = pg.TextItem(anchor=(0, 1), color='y')
+        self.plot.addItem(self.cursor_label)
+        self.update_cursor_position()
+
+        # Connect cursor movement to a function
+        self.cursor.sigPositionChanged.connect(self.update_cursor_position)
+
     def toggle_trigger_mode(self, channel_idx):
         self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_modes)
         mode = self.trigger_modes[self.trigger_mode_indices[channel_idx]]
@@ -299,6 +311,11 @@ class LogicDisplay(QMainWindow):
                             square_wave_data.append(self.data_buffer[i][j] + inverted_index * 2)
                     self.curves[i].setData(square_wave_time, square_wave_data)
 
+    def update_cursor_position(self):
+        cursor_pos = self.cursor.pos().x()
+        self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
+        self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)  # Adjust label position vertically
+        
     def closeEvent(self, event):
         self.worker.stop_worker()
         self.worker.quit()
