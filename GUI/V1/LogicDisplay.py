@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QGridLayout,
     QInputDialog,
     QMenu,
     QPushButton,
@@ -22,24 +23,53 @@ class SerialWorker(QThread):
     def __init__(self, port, baudrate):
         super().__init__()
         self.is_running = True
+        self.trigger_mode = 'No Trigger'  # Initialize trigger mode
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
             print(f"Failed to open serial port: {str(e)}")
             self.is_running = False
 
+    def set_trigger_mode(self, mode):
+        self.trigger_mode = mode
+
     def run(self):
+        pre_trigger_buffer_size = 1000  # Adjust as needed
+        data_buffer = []
+        triggered = False
+
         while self.is_running:
             if self.serial.in_waiting:
-                data = self.serial.read(self.serial.in_waiting).splitlines()
-                processed_data = []
-                for line in data:
+                raw_data = self.serial.read(self.serial.in_waiting).splitlines()
+                for line in raw_data:
                     try:
                         data_value = int(line.strip())
-                        processed_data.append(data_value)
+                        data_buffer.append(data_value)
+                        # Keep the buffer size manageable
+                        if len(data_buffer) > pre_trigger_buffer_size:
+                            data_buffer.pop(0)
+
+                        if not triggered and self.trigger_mode != 'No Trigger':
+                            # Check for trigger condition
+                            last_value = data_buffer[-2] if len(data_buffer) >= 2 else None
+                            if last_value is not None:
+                                bit_index = 0  # Assuming trigger on channel 0; adjust as needed
+                                current_bit = (data_value >> bit_index) & 1
+                                last_bit = (last_value >> bit_index) & 1
+
+                                if self.trigger_mode == 'Rising Edge' and last_bit == 0 and current_bit == 1:
+                                    triggered = True
+                                    print("Trigger condition met: Rising Edge")
+                                elif self.trigger_mode == 'Falling Edge' and last_bit == 1 and current_bit == 0:
+                                    triggered = True
+                                    print("Trigger condition met: Falling Edge")
+                        else:
+                            if self.trigger_mode == 'No Trigger' or triggered:
+                                # Emit the data
+                                self.data_ready.emit([data_value])
+
                     except ValueError:
                         continue
-                self.data_ready.emit(processed_data)
 
     def stop_worker(self):
         self.is_running = False
@@ -114,6 +144,9 @@ class LogicDisplay(QMainWindow):
         self.data_buffer = [[] for _ in range(self.channels)]
         self.channel_visibility = [False] * self.channels
 
+        self.trigger_modes = ['No Trigger', 'Rising Edge', 'Falling Edge']
+        self.trigger_mode_index = 0
+
         self.setup_ui()
 
         self.timer = QTimer()
@@ -152,12 +185,17 @@ class LogicDisplay(QMainWindow):
         self.curves = []
         for i in range(self.channels):
             color = self.colors[i % len(self.colors)]
-            curve = self.plot.plot(pen=pg.mkPen(color=color, width=4))  # Change width to make lines thicker/thinner
+            curve = self.plot.plot(pen=pg.mkPen(color=color, width=4))
             curve.setVisible(self.channel_visibility[i])
             self.curves.append(curve)
 
-        button_layout = QVBoxLayout()
+        button_layout = QGridLayout()
         main_layout.addLayout(button_layout)
+
+        # Create the Trigger Mode button
+        self.trigger_mode_button = QPushButton(self.trigger_modes[self.trigger_mode_index])
+        self.trigger_mode_button.clicked.connect(self.toggle_trigger_mode)
+        button_layout.addWidget(self.trigger_mode_button, 0, 1)  # Place in row 0, column 1
 
         self.channel_buttons = []
         for i in range(self.channels):
@@ -169,12 +207,20 @@ class LogicDisplay(QMainWindow):
             # Set the channel color property
             color = self.colors[i % len(self.colors)]
             button.setProperty('channelColor', color)
-            button_layout.addWidget(button)
+            button_layout.addWidget(button, i + 1, 0)  # Place in column 0
             self.channel_buttons.append(button)
 
+        # Start/Stop button
         self.toggle_button = QPushButton("Start")
         self.toggle_button.clicked.connect(self.toggle_reading)
-        button_layout.addWidget(self.toggle_button)
+        button_layout.addWidget(self.toggle_button, self.channels + 1, 0)
+
+    def toggle_trigger_mode(self):
+        self.trigger_mode_index = (self.trigger_mode_index + 1) % len(self.trigger_modes)
+        self.trigger_mode_button.setText(self.trigger_modes[self.trigger_mode_index])
+        # Update the worker's trigger mode
+        if self.worker:
+            self.worker.set_trigger_mode(self.trigger_modes[self.trigger_mode_index])
 
     def is_light_color(self, hex_color):
         """
@@ -254,4 +300,3 @@ class LogicDisplay(QMainWindow):
         self.worker.quit()
         self.worker.wait()
         event.accept()
-        
