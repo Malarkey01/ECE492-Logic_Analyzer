@@ -10,8 +10,10 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QMenu,
     QPushButton,
+    QLabel,
+    QLineEdit,  # Added QLabel and QLineEdit
 )
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QIntValidator  # Added QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 import pyqtgraph as pg
 import numpy as np
@@ -213,12 +215,22 @@ class LogicDisplay(QMainWindow):
             button_layout.addWidget(trigger_button, i, 1)  # Place in column 1
             self.trigger_mode_buttons.append(trigger_button)
 
+        # Sample Rate Label
+        self.sample_rate_label = QLabel("Sample Rate (Hz):")
+        button_layout.addWidget(self.sample_rate_label, self.channels, 0)
+
+        # Sample Rate Input
+        self.sample_rate_input = QLineEdit()
+        self.sample_rate_input.setValidator(QIntValidator(0, 1000000))
+        self.sample_rate_input.setText("1000")  # Default value
+        button_layout.addWidget(self.sample_rate_input, self.channels, 1)
+
         # Start/Stop button
         self.toggle_button = QPushButton("Start")
         self.toggle_button.clicked.connect(self.toggle_reading)
-        button_layout.addWidget(self.toggle_button, self.channels, 0, 1, 2)  # Span two columns
+        button_layout.addWidget(self.toggle_button, self.channels + 1, 0, 1, 2)  # Span two columns
 
-         # Adding a movable vertical cursor
+        # Adding a movable vertical cursor
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
         self.plot.addItem(self.cursor)
 
@@ -315,7 +327,7 @@ class LogicDisplay(QMainWindow):
         cursor_pos = self.cursor.pos().x()
         self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
         self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)  # Adjust label position vertically
-        
+
     def closeEvent(self, event):
         self.worker.stop_worker()
         self.worker.quit()
