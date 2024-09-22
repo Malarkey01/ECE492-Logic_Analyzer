@@ -11,92 +11,72 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPushButton,
     QLabel,
-    QLineEdit,
+    QLineEdit,  # Added QLabel and QLineEdit
 )
-from PyQt6.QtGui import QIcon, QIntValidator
-from PyQt6.QtCore import QTimer, QThread, pyqtSignal, QObject, Qt
+from PyQt6.QtGui import QIcon, QIntValidator  # Added QIntValidator
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 import pyqtgraph as pg
 import numpy as np
 from aesthetic import get_icon
 
 class SerialWorker(QThread):
-    raw_data_ready = pyqtSignal(bytes)  # Emit raw data as bytes
+    data_ready = pyqtSignal(list)
 
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
         self.is_running = True
         self.channels = channels
-        self.port = port
-        self.baudrate = baudrate
+        self.trigger_modes = ['No Trigger'] * channels  # Initialize trigger modes for each channel
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
             print(f"Failed to open serial port: {str(e)}")
             self.is_running = False
 
+    def set_trigger_mode(self, channel_idx, mode):
+        self.trigger_modes[channel_idx] = mode
+
     def run(self):
+        pre_trigger_buffer_size = 1000  # Adjust as needed
+        data_buffer = []
+        triggered = [False] * self.channels  # Trigger state per channel
+
         while self.is_running:
             if self.serial.in_waiting:
-                raw_data = self.serial.read(self.serial.in_waiting)
-                self.raw_data_ready.emit(raw_data)
+                raw_data = self.serial.read(self.serial.in_waiting).splitlines()
+                for line in raw_data:
+                    try:
+                        data_value = int(line.strip())
+                        data_buffer.append(data_value)
+                        # Keep the buffer size manageable
+                        if len(data_buffer) > pre_trigger_buffer_size:
+                            data_buffer.pop(0)
+
+                        # Check trigger conditions for each channel
+                        for i in range(self.channels):
+                            if not triggered[i] and self.trigger_modes[i] != 'No Trigger':
+                                last_value = data_buffer[-2] if len(data_buffer) >= 2 else None
+                                if last_value is not None:
+                                    current_bit = (data_value >> i) & 1
+                                    last_bit = (last_value >> i) & 1
+
+                                    if self.trigger_modes[i] == 'Rising Edge' and last_bit == 0 and current_bit == 1:
+                                        triggered[i] = True
+                                        print(f"Trigger condition met on channel {i+1}: Rising Edge")
+                                    elif self.trigger_modes[i] == 'Falling Edge' and last_bit == 1 and current_bit == 0:
+                                        triggered[i] = True
+                                        print(f"Trigger condition met on channel {i+1}: Falling Edge")
+                        # If any channel is triggered or all are set to 'No Trigger', emit data
+                        if any(triggered) or all(mode == 'No Trigger' for mode in self.trigger_modes):
+                            self.data_ready.emit([data_value])
+
+                    except ValueError:
+                        continue
 
     def stop_worker(self):
         self.is_running = False
         if self.serial.is_open:
             self.serial.close()
-
-class DataProcessor(QObject):
-    data_processed = pyqtSignal(list)
-
-    def __init__(self, channels=8):
-        super().__init__()
-        self.channels = channels
-        self.trigger_modes = ['No Trigger'] * channels  # Initialize trigger modes for each channel
-        self.triggered = [False] * channels
-        self.pre_trigger_buffer_size = 1000
-        self.data_buffer = []
-        self.is_running = True
-
-    def set_trigger_mode(self, channel_idx, mode):
-        self.trigger_modes[channel_idx] = mode
-        self.triggered[channel_idx] = False  # Reset trigger status
-
-    def process_data(self, raw_data):
-        if not self.is_running:
-            return
-        lines = raw_data.splitlines()
-        for line in lines:
-            try:
-                data_value = int(line.strip())
-                self.data_buffer.append(data_value)
-                # Keep buffer size manageable
-                if len(self.data_buffer) > self.pre_trigger_buffer_size:
-                    self.data_buffer.pop(0)
-
-                # Check trigger conditions for each channel
-                for i in range(self.channels):
-                    if not self.triggered[i] and self.trigger_modes[i] != 'No Trigger':
-                        last_value = self.data_buffer[-2] if len(self.data_buffer) >= 2 else None
-                        if last_value is not None:
-                            current_bit = (data_value >> i) & 1
-                            last_bit = (last_value >> i) & 1
-
-                            if self.trigger_modes[i] == 'Rising Edge' and last_bit == 0 and current_bit == 1:
-                                self.triggered[i] = True
-                                print(f"Trigger condition met on channel {i+1}: Rising Edge")
-                            elif self.trigger_modes[i] == 'Falling Edge' and last_bit == 1 and current_bit == 0:
-                                self.triggered[i] = True
-                                print(f"Trigger condition met on channel {i+1}: Falling Edge")
-
-                # If any channel is triggered or all are set to 'No Trigger', emit data
-                if any(self.triggered) or all(mode == 'No Trigger' for mode in self.trigger_modes):
-                    self.data_processed.emit([data_value])
-
-            except ValueError:
-                continue
-
-    def stop(self):
-        self.is_running = False
 
 class FixedYViewBox(pg.ViewBox):
     def __init__(self, *args, **kwargs):
@@ -168,25 +148,14 @@ class LogicDisplay(QMainWindow):
 
         self.setup_ui()
 
-        self.is_reading = False
-
-        # Initialize workers and threads
-        self.serial_worker = SerialWorker(self.port, self.baudrate, channels=self.channels)
-        self.data_processor = DataProcessor(channels=self.channels)
-
-        # Thread for DataProcessor
-        self.processor_thread = QThread()
-        self.data_processor.moveToThread(self.processor_thread)
-
-        # Connect signals
-        self.serial_worker.raw_data_ready.connect(self.data_processor.process_data)
-        self.data_processor.data_processed.connect(self.handle_data)
-
-        self.serial_worker.start()
-        self.processor_thread.start()
-
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_plot)
+
+        self.is_reading = False
+
+        self.worker = SerialWorker(self.port, self.baudrate, channels=self.channels)
+        self.worker.data_ready.connect(self.handle_data)
+        self.worker.start()
 
     def setup_ui(self):
         self.setWindowTitle("Logic Analyzer")
@@ -261,13 +230,25 @@ class LogicDisplay(QMainWindow):
         self.toggle_button.clicked.connect(self.toggle_reading)
         button_layout.addWidget(self.toggle_button, self.channels + 1, 0, 1, 2)  # Span two columns
 
+        # Adding a movable vertical cursor
+        self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
+        self.plot.addItem(self.cursor)
+
+        # Label to display cursor position
+        self.cursor_label = pg.TextItem(anchor=(0, 1), color='y')
+        self.plot.addItem(self.cursor_label)
+        self.update_cursor_position()
+
+        # Connect cursor movement to a function
+        self.cursor.sigPositionChanged.connect(self.update_cursor_position)
+
     def toggle_trigger_mode(self, channel_idx):
         self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_modes)
         mode = self.trigger_modes[self.trigger_mode_indices[channel_idx]]
         self.trigger_mode_buttons[channel_idx].setText(mode)
-        # Update the data processor's trigger mode for this channel
-        if self.data_processor:
-            self.data_processor.set_trigger_mode(channel_idx, mode)
+        # Update the worker's trigger mode for this channel
+        if self.worker:
+            self.worker.set_trigger_mode(channel_idx, mode)
 
     def is_light_color(self, hex_color):
         """
@@ -342,11 +323,13 @@ class LogicDisplay(QMainWindow):
                             square_wave_data.append(self.data_buffer[i][j] + inverted_index * 2)
                     self.curves[i].setData(square_wave_time, square_wave_data)
 
+    def update_cursor_position(self):
+        cursor_pos = self.cursor.pos().x()
+        self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
+        self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)  # Adjust label position vertically
+
     def closeEvent(self, event):
-        self.serial_worker.stop_worker()
-        self.serial_worker.quit()
-        self.serial_worker.wait()
-        self.data_processor.stop()
-        self.processor_thread.quit()
-        self.processor_thread.wait()
+        self.worker.stop_worker()
+        self.worker.quit()
+        self.worker.wait()
         event.accept()
