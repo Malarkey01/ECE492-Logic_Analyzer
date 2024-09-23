@@ -333,6 +333,13 @@ class LogicDisplay(QMainWindow):
         cursor_pos = self.cursor.pos().x()
         self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
         self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)
+        
+    def keyPressEvent(self, event):
+       if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+           self.toggle_reading()
+           event.accept()
+       else:
+           super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
