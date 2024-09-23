@@ -1,7 +1,7 @@
 ******************************************************************************
                   MSP430 Linker PC v21.6.1                     
 ******************************************************************************
->> Linked Wed Aug 28 11:30:51 2024
+>> Linked Mon Sep 16 10:50:45 2024
 
 OUTPUT FILE NAME:   <Logic_Generator.out>
 ENTRY POINT SYMBOL: "_c_int00_noinit_noargs_mpu"  address: 00004400
