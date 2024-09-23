@@ -170,7 +170,8 @@ class LogicDisplay(QMainWindow):
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
         # Set x-axis to show all 1024 data points
-        self.plot.setXRange(0, 1024, padding=0)
+        self.plot.setXRange(0, 200, padding=0)
+        self.plot.setLimits(xMin=0, xMax=1024)  # Set x-axis pan limits
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
@@ -260,11 +261,35 @@ class LogicDisplay(QMainWindow):
 
     def toggle_reading(self):
         if self.is_reading:
+            self.send_stop_message()
             self.stop_reading()
             self.toggle_button.setText("Start")
         else:
+            self.send_start_message()
             self.start_reading()
             self.toggle_button.setText("Stop")
+            
+    def send_start_message(self):
+        """Sends the 'start' message to the device."""
+        if self.worker.serial.is_open:
+            try:
+                self.worker.serial.write(b'start')  # Send the start message
+                print("Sent 'start' command to device")
+            except serial.SerialException as e:
+                print(f"Failed to send 'start' command: {str(e)}")
+        else:
+            print("Serial connection is not open")
+            
+    def send_stop_message(self):
+        """Sends the 'start' message to the device."""
+        if self.worker.serial.is_open:
+            try:
+                self.worker.serial.write(b'stop')  # Send the stop message
+                print("Sent 'stop' command to device")
+            except serial.SerialException as e:
+                print(f"Failed to send 'stop' command: {str(e)}")
+        else:
+            print("Serial connection is not open")
 
     def start_reading(self):
         if not self.is_reading:
