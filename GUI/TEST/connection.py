@@ -57,7 +57,7 @@ class SerialApp(QMainWindow):
                 self.logic_display_window.close()
 
             # Create a new LogicDisplay window
-            self.logic_display_window = LogicDisplay(port=port_name, baudrate=20000000, channels=8)
+            self.logic_display_window = LogicDisplay(port=port_name, baudrate=115200, channels=8)
             self.logic_display_window.show()
 
         except Exception as e:

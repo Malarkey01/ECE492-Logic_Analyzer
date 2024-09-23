@@ -287,7 +287,6 @@ class LogicDisplay(QMainWindow):
         if self.worker.serial.is_open:
             try:
                 self.worker.serial.write(b'0')
-                self.worker.serial.write(b'0')
                 print("Sent 'start' command to device")
             except serial.SerialException as e:
                 print(f"Failed to send 'start' command: {str(e)}")
@@ -297,7 +296,6 @@ class LogicDisplay(QMainWindow):
     def send_stop_message(self):
         if self.worker.serial.is_open:
             try:
-                self.worker.serial.write(b'0')
                 self.worker.serial.write(b'1')
                 print("Sent 'stop' command to device")
             except serial.SerialException as e:
