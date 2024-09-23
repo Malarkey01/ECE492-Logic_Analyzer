@@ -11,9 +11,9 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPushButton,
     QLabel,
-    QLineEdit,  # Added QLabel and QLineEdit
+    QLineEdit,
 )
-from PyQt6.QtGui import QIcon, QIntValidator  # Added QIntValidator
+from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 import pyqtgraph as pg
 import numpy as np
@@ -26,7 +26,7 @@ class SerialWorker(QThread):
         super().__init__()
         self.is_running = True
         self.channels = channels
-        self.trigger_modes = ['No Trigger'] * channels  # Initialize trigger modes for each channel
+        self.trigger_modes = ['No Trigger'] * channels
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
@@ -37,9 +37,9 @@ class SerialWorker(QThread):
         self.trigger_modes[channel_idx] = mode
 
     def run(self):
-        pre_trigger_buffer_size = 1000  # Adjust as needed
+        pre_trigger_buffer_size = 1000
         data_buffer = []
-        triggered = [False] * self.channels  # Trigger state per channel
+        triggered = [False] * self.channels
 
         while self.is_running:
             if self.serial.in_waiting:
@@ -48,11 +48,9 @@ class SerialWorker(QThread):
                     try:
                         data_value = int(line.strip())
                         data_buffer.append(data_value)
-                        # Keep the buffer size manageable
                         if len(data_buffer) > pre_trigger_buffer_size:
                             data_buffer.pop(0)
 
-                        # Check trigger conditions for each channel
                         for i in range(self.channels):
                             if not triggered[i] and self.trigger_modes[i] != 'No Trigger':
                                 last_value = data_buffer[-2] if len(data_buffer) >= 2 else None
@@ -66,7 +64,6 @@ class SerialWorker(QThread):
                                     elif self.trigger_modes[i] == 'Falling Edge' and last_bit == 1 and current_bit == 0:
                                         triggered[i] = True
                                         print(f"Trigger condition met on channel {i+1}: Falling Edge")
-                        # If any channel is triggered or all are set to 'No Trigger', emit data
                         if any(triggered) or all(mode == 'No Trigger' for mode in self.trigger_modes):
                             self.data_ready.emit([data_value])
 
@@ -146,6 +143,8 @@ class LogicDisplay(QMainWindow):
         self.data_buffer = [[] for _ in range(self.channels)]
         self.channel_visibility = [False] * self.channels
 
+        self.is_single_capture = False  # Initialize single capture flag
+
         self.setup_ui()
 
         self.timer = QTimer()
@@ -171,7 +170,7 @@ class LogicDisplay(QMainWindow):
 
         # Set x-axis to show all 1024 data points
         self.plot.setXRange(0, 200, padding=0)
-        self.plot.setLimits(xMin=0, xMax=1024)  # Set x-axis pan limits
+        self.plot.setLimits(xMin=0, xMax=1024)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
@@ -195,7 +194,7 @@ class LogicDisplay(QMainWindow):
         self.channel_buttons = []
         self.trigger_mode_buttons = []
         self.trigger_modes = ['No Trigger', 'Rising Edge', 'Falling Edge']
-        self.trigger_mode_indices = [0] * self.channels  # Initialize indices for each channel
+        self.trigger_mode_indices = [0] * self.channels
 
         for i in range(self.channels):
             label = f"DIO {i+1}"
@@ -204,12 +203,12 @@ class LogicDisplay(QMainWindow):
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel(idx, checked))
             color = self.colors[i % len(self.colors)]
-            button_layout.addWidget(button, i, 0)  # Place in column 0
+            button_layout.addWidget(button, i, 0)
             self.channel_buttons.append(button)
 
             trigger_button = QPushButton(self.trigger_modes[self.trigger_mode_indices[i]])
             trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx))
-            button_layout.addWidget(trigger_button, i, 1)  # Place in column 1
+            button_layout.addWidget(trigger_button, i, 1)
             self.trigger_mode_buttons.append(trigger_button)
 
         self.sample_rate_label = QLabel("Sample Rate (Hz):")
@@ -217,12 +216,22 @@ class LogicDisplay(QMainWindow):
 
         self.sample_rate_input = QLineEdit()
         self.sample_rate_input.setValidator(QIntValidator(0, 1000000))
-        self.sample_rate_input.setText("1000")  # Default value
+        self.sample_rate_input.setText("1000")
         button_layout.addWidget(self.sample_rate_input, self.channels, 1)
+
+        # Create a horizontal layout for the Start/Stop and Single buttons
+        control_buttons_layout = QHBoxLayout()
 
         self.toggle_button = QPushButton("Start")
         self.toggle_button.clicked.connect(self.toggle_reading)
-        button_layout.addWidget(self.toggle_button, self.channels + 1, 0, 1, 2)  # Span two columns
+        control_buttons_layout.addWidget(self.toggle_button)
+
+        self.single_button = QPushButton("Single")
+        self.single_button.clicked.connect(self.start_single_capture)
+        control_buttons_layout.addWidget(self.single_button)
+
+        # Add the control buttons layout to the button_layout
+        button_layout.addLayout(control_buttons_layout, self.channels + 1, 0, 1, 2)
 
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
         self.plot.addItem(self.cursor)
@@ -263,28 +272,31 @@ class LogicDisplay(QMainWindow):
         if self.is_reading:
             self.send_stop_message()
             self.stop_reading()
-            self.toggle_button.setText("Start")
+            self.toggle_button.setText("Run")
+            self.single_button.setEnabled(True)
+            self.toggle_button.setStyleSheet("")  # Reset to default style
         else:
+            self.is_single_capture = False
             self.send_start_message()
             self.start_reading()
-            self.toggle_button.setText("Stop")
-            
+            self.toggle_button.setText("Running")
+            self.single_button.setEnabled(True)  # Keep Single button enabled
+            self.toggle_button.setStyleSheet("background-color: #00FF77; color: black;")  # Change to cyan with black text
+
     def send_start_message(self):
-        """Sends the 'start' message to the device."""
         if self.worker.serial.is_open:
             try:
-                self.worker.serial.write(b'start')  # Send the start message
+                self.worker.serial.write(b'0')
                 print("Sent 'start' command to device")
             except serial.SerialException as e:
                 print(f"Failed to send 'start' command: {str(e)}")
         else:
             print("Serial connection is not open")
-            
+
     def send_stop_message(self):
-        """Sends the 'start' message to the device."""
         if self.worker.serial.is_open:
             try:
-                self.worker.serial.write(b'stop')  # Send the stop message
+                self.worker.serial.write(b'1')
                 print("Sent 'stop' command to device")
             except serial.SerialException as e:
                 print(f"Failed to send 'stop' command: {str(e)}")
@@ -301,14 +313,38 @@ class LogicDisplay(QMainWindow):
             self.is_reading = False
             self.timer.stop()
 
+    def start_single_capture(self):
+        if not self.is_reading:
+            self.clear_data_buffers()
+            self.is_single_capture = True
+            self.send_start_message()
+            self.start_reading()
+            self.single_button.setEnabled(False)
+            self.toggle_button.setEnabled(False)
+            self.single_button.setStyleSheet("background-color: #00FF77; color: black;")  # Change to cyan with black text
+
+    def stop_single_capture(self):
+        self.is_single_capture = False
+        self.stop_reading()
+        self.send_stop_message()
+        self.single_button.setEnabled(True)
+        self.toggle_button.setEnabled(True)
+        self.toggle_button.setText("Start")
+        self.single_button.setStyleSheet("")  # Reset to default style
+
+    def clear_data_buffers(self):
+        self.data_buffer = [[] for _ in range(self.channels)]
+
     def handle_data(self, data_list):
         if self.is_reading:
             for data_value in data_list:
                 for i in range(self.channels):
                     bit_value = (data_value >> i) & 1
                     self.data_buffer[i].append(bit_value)
-                    if len(self.data_buffer[i]) > 1024:  # Increased to 1024
+                    if len(self.data_buffer[i]) > 1024:
                         self.data_buffer[i].pop(0)
+            if self.is_single_capture and all(len(buf) >= 1024 for buf in self.data_buffer):
+                self.stop_single_capture()
 
     def update_plot(self):
         for i in range(self.channels):
@@ -333,13 +369,13 @@ class LogicDisplay(QMainWindow):
         cursor_pos = self.cursor.pos().x()
         self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
         self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)
-        
+
     def keyPressEvent(self, event):
-       if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
-           self.toggle_reading()
-           event.accept()
-       else:
-           super().keyPressEvent(event)
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.toggle_reading()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
