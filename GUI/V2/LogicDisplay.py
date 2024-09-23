@@ -169,8 +169,10 @@ class LogicDisplay(QMainWindow):
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
+        # Set x-axis to show all 1024 data points
+        self.plot.setXRange(0, 1024, padding=0)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
-        self.plot.enableAutoRange(axis=pg.ViewBox.XAxis)
+        self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
 
@@ -178,9 +180,7 @@ class LogicDisplay(QMainWindow):
         self.plot.getAxis('left').setStyle(showValues=False)
         self.plot.getAxis('left').setPen(None)
 
-        # Define the custom colors for the channels
         self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
-
         self.curves = []
         for i in range(self.channels):
             color = self.colors[i % len(self.colors)]
@@ -197,64 +197,49 @@ class LogicDisplay(QMainWindow):
         self.trigger_mode_indices = [0] * self.channels  # Initialize indices for each channel
 
         for i in range(self.channels):
-            # Channel button
             label = f"DIO {i+1}"
             button = EditableButton(label)
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel(idx, checked))
-            # Set the channel color property
             color = self.colors[i % len(self.colors)]
-            button.setProperty('channelColor', color)
             button_layout.addWidget(button, i, 0)  # Place in column 0
             self.channel_buttons.append(button)
 
-            # Trigger mode button
             trigger_button = QPushButton(self.trigger_modes[self.trigger_mode_indices[i]])
             trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx))
             button_layout.addWidget(trigger_button, i, 1)  # Place in column 1
             self.trigger_mode_buttons.append(trigger_button)
 
-        # Sample Rate Label
         self.sample_rate_label = QLabel("Sample Rate (Hz):")
         button_layout.addWidget(self.sample_rate_label, self.channels, 0)
 
-        # Sample Rate Input
         self.sample_rate_input = QLineEdit()
         self.sample_rate_input.setValidator(QIntValidator(0, 1000000))
         self.sample_rate_input.setText("1000")  # Default value
         button_layout.addWidget(self.sample_rate_input, self.channels, 1)
 
-        # Start/Stop button
         self.toggle_button = QPushButton("Start")
         self.toggle_button.clicked.connect(self.toggle_reading)
         button_layout.addWidget(self.toggle_button, self.channels + 1, 0, 1, 2)  # Span two columns
 
-        # Adding a movable vertical cursor
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
         self.plot.addItem(self.cursor)
 
-        # Label to display cursor position
         self.cursor_label = pg.TextItem(anchor=(0, 1), color='y')
         self.plot.addItem(self.cursor_label)
         self.update_cursor_position()
 
-        # Connect cursor movement to a function
         self.cursor.sigPositionChanged.connect(self.update_cursor_position)
 
     def toggle_trigger_mode(self, channel_idx):
         self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_modes)
         mode = self.trigger_modes[self.trigger_mode_indices[channel_idx]]
         self.trigger_mode_buttons[channel_idx].setText(mode)
-        # Update the worker's trigger mode for this channel
         if self.worker:
             self.worker.set_trigger_mode(channel_idx, mode)
 
     def is_light_color(self, hex_color):
-        """
-        Determines if a hex color is light or dark.
-        Returns True if the color is light, False if dark.
-        """
         hex_color = hex_color.lstrip('#')
         r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
         luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
@@ -264,17 +249,13 @@ class LogicDisplay(QMainWindow):
         self.channel_visibility[channel_idx] = is_checked
         self.curves[channel_idx].setVisible(is_checked)
 
-        # Update button background color
         button = self.channel_buttons[channel_idx]
         if is_checked:
             color = self.colors[channel_idx % len(self.colors)]
-            # Decide text color based on background color brightness
             text_color = 'black' if self.is_light_color(color) else 'white'
-            # Set the button style
             button.setStyleSheet(f"QPushButton {{ background-color: {color}; color: {text_color}; "
                                  f"border: 1px solid #555; border-radius: 5px; padding: 5px; }}")
         else:
-            # Reset to default style
             button.setStyleSheet("")
 
     def toggle_reading(self):
@@ -301,7 +282,7 @@ class LogicDisplay(QMainWindow):
                 for i in range(self.channels):
                     bit_value = (data_value >> i) & 1
                     self.data_buffer[i].append(bit_value)
-                    if len(self.data_buffer[i]) > 600:
+                    if len(self.data_buffer[i]) > 1024:  # Increased to 1024
                         self.data_buffer[i].pop(0)
 
     def update_plot(self):
@@ -326,7 +307,7 @@ class LogicDisplay(QMainWindow):
     def update_cursor_position(self):
         cursor_pos = self.cursor.pos().x()
         self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
-        self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)  # Adjust label position vertically
+        self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
