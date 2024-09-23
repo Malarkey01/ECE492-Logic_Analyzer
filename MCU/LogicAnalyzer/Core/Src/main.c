@@ -34,13 +34,15 @@ int bufferPointer = 0;
 uint8_t Buff[10];
 int trigger = 0;
 char msg[10];
+char msg2[10];
 int samples = 0;
 int val = 0;
-int status = 0;
+int status = 1;
 uint16_t xorResult = 0;
 int trigcounter = 0;
 enum triggerStates{triggerState, postTrigger, preTrigger};
 enum triggerStates state;
+int counter = 0;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -66,8 +68,9 @@ DMA_HandleTypeDef hdma_tim1_up;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
-//static void MX_TIM16_Init(void);
-static void MX_TIM1_Init(uint32_t prescaler, uint32_t period);
+static void MX_TIM16_Init(void);
+static void MX_TIM1_Init(void);
+void Process_USB_Command(char *cmd);
 //static void MX_TIM16_Init(void);
 
 /* USER CODE BEGIN PFP */
@@ -91,7 +94,6 @@ int main(void)
 
   /* MCU Configuration--------------------------------------------------------*/
 
-	int n = 0;
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
@@ -110,9 +112,9 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_USB_DEVICE_Init();
-  //MX_TIM16_Init();
-  //MX_TIM1_Init();
-  MX_TIM1_Init(0, 79);  // Initial setup for 1 MHz sampling rate
+  MX_TIM16_Init();
+  MX_TIM1_Init();
+ // MX_TIM1_Init(0, 79);  // Initial setup for 1 MHz sampling rate
  // Start_TIM1_DMA();
  // MX_TIM16_Init();
 
@@ -125,8 +127,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   state = preTrigger;
 
-  HAL_TIM_Base_Start_IT(&htim1);
-
+  //HAL_TIM_Base_Start_IT(&htim1);
 
   while (1)
   {
@@ -144,22 +145,29 @@ int main(void)
 
     /* USER CODE END WHILE */
 	  //if(trigger == 0 && status == 1){
+
 	  switch(state){
 	  	  case preTrigger:
+	  		  if(status == 0){
+	  			 HAL_TIM_Base_Start_IT(&htim1);
+
+	  		  }
 	  		  break;
 	  	  case triggerState:
+
 	  		  break;
 	  	  case postTrigger:
 	  		  trigger = 0;
-	  		  sprintf(msg, "%hu\r\n", buffer[val]);
+	  		  sprintf(msg, "%hu\r\n", buffer[val++]);
 	  		  CDC_Transmit_FS((uint8_t *)msg, strlen(msg));
-	  		  HAL_Delay(2);
-	  		  val++;
+	  		  HAL_Delay(1);
 
-	  		  if(val == 1024){
+
+	  		  if(val == 300){
 	  			  val = 0;
 	  		  }
-	  		 HAL_TIM_Base_Start_IT(&htim1);
+	  		 if(status == 0){
+	  		 HAL_TIM_Base_Start_IT(&htim1);}
 	  		  break;
 	  }
     /* USER CODE BEGIN 3 */
@@ -232,7 +240,7 @@ void HAL_DMA_ErrorCallback(DMA_HandleTypeDef *hdma) {
   * @param None
   * @retval None
   */
-static void MX_TIM1_Init(uint32_t prescaler, uint32_t period)
+static void MX_TIM1_Init(void)
 {
 
   /* USER CODE BEGIN TIM1_Init 0 */
@@ -250,7 +258,7 @@ static void MX_TIM1_Init(uint32_t prescaler, uint32_t period)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 1;   //3300-1;
+  htim1.Init.Period = 719;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -275,7 +283,7 @@ static void MX_TIM1_Init(uint32_t prescaler, uint32_t period)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
+  sConfigOC.Pulse = 10;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -309,7 +317,6 @@ static void MX_TIM1_Init(uint32_t prescaler, uint32_t period)
   // Configure DMA request on update event
   __HAL_TIM_ENABLE_DMA(&htim1, TIM_DMA_UPDATE);
 
-
 }
 
 /**
@@ -317,83 +324,68 @@ static void MX_TIM1_Init(uint32_t prescaler, uint32_t period)
   * @param None
   * @retval None
   */
-//static void MX_TIM16_Init(void)
-//{
-//
-//  /* USER CODE BEGIN TIM16_Init 0 */
-//
-//  /* USER CODE END TIM16_Init 0 */
-//
-//  /* USER CODE BEGIN TIM16_Init 1 */
-//
-//  /* USER CODE END TIM16_Init 1 */
-//  htim16.Instance = TIM16;
-//  htim16.Init.Prescaler = 72-1;
-//  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
-//  htim16.Init.Period = 6554-1;
-//  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-//  htim16.Init.RepetitionCounter = 0;
-//  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-//  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
-//  {
-//    Error_Handler();
-//  }
-//  /* USER CODE BEGIN TIM16_Init 2 */
-//
-//  /* USER CODE END TIM16_Init 2 */
-//
-//}
+static void MX_TIM16_Init(void)
+{
+
+  /* USER CODE BEGIN TIM16_Init 0 */
+
+  /* USER CODE END TIM16_Init 0 */
+
+  /* USER CODE BEGIN TIM16_Init 1 */
+
+  /* USER CODE END TIM16_Init 1 */
+  htim16.Instance = TIM16;
+  htim16.Init.Prescaler = 72-1;
+  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim16.Init.Period = 6554-1;
+  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim16.Init.RepetitionCounter = 0;
+  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM16_Init 2 */
+
+  /* USER CODE END TIM16_Init 2 */
+
+}
 
 uint16_t trigPin = 0x01;
 uint16_t trigEdge = 0x00; //rising edge
-int triggerCount = 128;
-int counter = 0;
+int triggerCount = 300;
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 		if (htim == &htim1) {
 			if (trigger){
-				counter ++;
+				counter++;
 				if (counter == triggerCount){
 					state = postTrigger;
 					HAL_TIM_Base_Stop(&htim1);
-
 				}
 			}
 			else {
 				xorResult = GPIOB->IDR^buffer[bufferPointer];
-				if (xorResult & trigPin){
-					if(~(buffer[bufferPointer]^trigEdge)){
-						//checking for falling edge
-						if (~(trigEdge)){
-							if ((xorResult & trigPin) & (~(buffer[bufferPointer]^trigEdge))){
-								trigger = 1; counter = 0;
-								//change state
-								state = triggerState;
-								//HAL_TIM_Base_Start_IT(&htim16);
-							}
-						}
-						else{
-							trigger = 1; counter = 0;
-							state = triggerState;
-							//HAL_TIM_Base_Start_IT(&htim16);
-						}
-					}
+				uint16_t trigPinCheck = xorResult & trigPin;
+				uint16_t trigEdgeCheck = ~(buffer[bufferPointer]^trigEdge);
+				trigger = (trigPinCheck & trigEdgeCheck) > 0;
+				if (trigger){
+					counter = 0;
+					state = triggerState;
 				}
+					//HAL_TIM_Base_Start_IT(&htim16);
 			}
 
 			//add value to buffer
 			buffer[bufferPointer] = GPIOB->IDR;
 			//FIXME: increment pointer with circular logic using logic gates
 			bufferPointer++;
-			if (bufferPointer > 1024){
-				bufferPointer = 0;
-			}
+			bufferPointer &= 0x03FF;
+//			if (bufferPointer > 1024){ // we can use and with 10 bits to with 0x03FF
+//				bufferPointer = 0;
+//			}
 		}
-		//trigger timer interrupt
-		if (htim == &htim16){
-			trigger = 0;
-			//push buffer to usb
 
-		}
 }
 
 
@@ -480,40 +472,64 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-void Start_TIM1_DMA(void) {
-    //HAL_TIM_Base_Start_IT(&htim1);
-    //HAL_DMA_Start_IT(&hdma_tim1_up, (uint32_t)&GPIOB->IDR, (uint32_t)buffer, BUFFER_SIZE);
-}
 
-void Stop_TIM1_DMA(void) {
-    HAL_TIM_Base_Stop(&htim1);
-    HAL_DMA_Abort(&hdma_tim1_up);
-}
 
-void Change_Sampling_Rate(uint32_t new_rate) {
-    uint32_t prescaler = 0;  // Prescaler value set to 0 for high frequencies
-    uint32_t period = (72000000 / (prescaler + 1) / new_rate) - 1;
-
-    Stop_TIM1_DMA();
-    MX_TIM1_Init(prescaler, period);
-    Start_TIM1_DMA();
-}
+int commandValueToggle = 1; //0 is command, 1 is value
+uint8_t command = 0;
 
 void Process_USB_Command(char *cmd) {
-    uint32_t new_rate = atoi(cmd);  // Convert command string to integer
+	commandValueToggle ^= 1;
+	//if its command state, convert to integer and take in the command value
+	//value state
+	if (commandValueToggle){
+		switch(command){
+		case 0://start/stop
+			status = atoi(cmd);
 
+			break;
+		case 1: //trigger pin command
 
+			//trigPin = atoi(cmd);
+			break;
+		case 2: //trigger
+			trigEdge = atoi(cmd);
+		case 3: //upper 8 bits of period
+			break;
+		case 4: //lower 8 bits of period
+			break;
+		case 5: //trigger count
+			triggerCount = atoi(cmd);
+			break;
+		case 6: //prescaler (clock divider)
+			break;
+		}
+	}
+	//command state
+	else if(~commandValueToggle){
+		command = atoi(cmd);
+	}
 
-    if(new_rate == 6){
-    	trigger = 1;
-    }
-    else if(new_rate ==7){
-    	trigger = 0;
-    }
-
-    else {
-        // Handle invalid rate input (optional)
-    }
+//	int new_rate = 0;
+//
+//
+//    if(command == 0){HAL_TIM_Base_Start_IT(&htim1);}
+//
+//    else if(command == 1){status = 1;}
+//
+//    else if(new_rate ==2){
+//    	 trigEdge = 0x00;
+//    }
+//    else if(new_rate ==3){
+//    	 trigEdge = 0x01;
+//    }
+//
+//    else if(new_rate ==4){
+//    	 trigPin = 000;
+//    }
+//
+//    else {
+//        // Handle invalid rate input (optional)
+//    }
 }
 /* USER CODE END 4 */
 
