@@ -33,6 +33,8 @@ uint16_t buffer[BUFFER_SIZE];
 int bufferPointer = 0;
 uint8_t Buff[10];
 int trigger = 0;
+int Period_T;
+int period = 65536;
 char msg[10];
 char msg2[10];
 int samples = 0;
@@ -69,7 +71,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_TIM16_Init(void);
-static void MX_TIM1_Init(void);
+static void MX_TIM1_Init(int period);
 void Process_USB_Command(char *cmd);
 //static void MX_TIM16_Init(void);
 
@@ -113,7 +115,7 @@ int main(void)
   MX_DMA_Init();
   MX_USB_DEVICE_Init();
   MX_TIM16_Init();
-  MX_TIM1_Init();
+  MX_TIM1_Init(period);
  // MX_TIM1_Init(0, 79);  // Initial setup for 1 MHz sampling rate
  // Start_TIM1_DMA();
  // MX_TIM16_Init();
@@ -240,7 +242,7 @@ void HAL_DMA_ErrorCallback(DMA_HandleTypeDef *hdma) {
   * @param None
   * @retval None
   */
-static void MX_TIM1_Init(void)
+static void MX_TIM1_Init(int period)
 {
 
   /* USER CODE BEGIN TIM1_Init 0 */
@@ -258,7 +260,7 @@ static void MX_TIM1_Init(void)
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 719;
+  htim1.Init.Period = period-1;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -351,8 +353,8 @@ static void MX_TIM16_Init(void)
 
 }
 
-uint16_t trigPin = 0x01;
-uint16_t trigEdge = 0x00; //rising edge
+uint16_t trigPin;
+uint16_t trigEdge; //Falling Edge
 int triggerCount = 300;
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
@@ -473,41 +475,100 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 
+uint8_t trigPIN[8]={0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
+int Period_T1[10]={1000, 2000, 3000, 45000, 50000, 32000, 35000, 25000, 40000, 65536};
 
-int commandValueToggle = 1; //0 is command, 1 is value
-uint8_t command = 0;
+int command = 0;
 
 void Process_USB_Command(char *cmd) {
-	commandValueToggle ^= 1;
 	//if its command state, convert to integer and take in the command value
 	//value state
-	if (commandValueToggle){
+	command = atoi(cmd);
 		switch(command){
-		case 0://start/stop
-			status = atoi(cmd);
+		case 0://start
+			status = 0;
+			break;
+		case 1: //stop
+			status = 1;
+			break;
+		case 2: //trigger Falling Edge
+			trigEdge = 0x00;
+		case 3: //trigger Rising Edge;
+			trigEdge = 0x01;
+			break;
+		case 4: //trigger PIN from 0 to 7
+			trigPin = trigPIN[0];
+			break;
+		case 5:
+			trigPin = trigPIN[1];
+			break;
+		case 6:
+			trigPin = trigPIN[2];
+			break;
+		case 7:
+			trigPin = trigPIN[3];
+			break;
+		case 8:
+			trigPin = trigPIN[4];
+			break;
+		case 9:
+			trigPin = trigPIN[5];
+			break;
+		case 10:
+			trigPin = trigPIN[6];
+			break;
+		case 11:
+			trigPin = trigPIN[7];
+			break;
+		case 12:
+			trigPin = trigPIN[8];
+			break;
+		case 13:
+			change_period(Period_T1[0]);
 
 			break;
-		case 1: //trigger pin command
+		case 14:
+			change_period(Period_T1[1]);
 
-			//trigPin = atoi(cmd);
 			break;
-		case 2: //trigger
-			trigEdge = atoi(cmd);
-		case 3: //upper 8 bits of period
+		case 15:
+			change_period(Period_T1[2]);
+
 			break;
-		case 4: //lower 8 bits of period
+		case 16:
+			change_period(Period_T1[3]);
+
 			break;
-		case 5: //trigger count
-			triggerCount = atoi(cmd);
+		case 17:
+			change_period(Period_T1[4]);
+
 			break;
-		case 6: //prescaler (clock divider)
+		case 18:
+			change_period(Period_T1[5]);
+
 			break;
-		}
+			
+		case 19:
+			change_period(Period_T1[6]);
+
+			break;
+		case 20:
+			change_period(Period_T1[7]);
+
+			break;
+			
+		case 21:
+			change_period(Period_T1[8]);
+
+			break;
+		case 22:
+			change_period(Period_T1[9]);
+
+			break;
+		}		
 	}
 	//command state
-	else if(~commandValueToggle){
-		command = atoi(cmd);
-	}
+
 
 //	int new_rate = 0;
 //
@@ -530,7 +591,20 @@ void Process_USB_Command(char *cmd) {
 //    else {
 //        // Handle invalid rate input (optional)
 //    }
+
+void change_period(int period){
+
+	HAL_TIM_Base_Stop(&htim1);
+	
+	MX_TIM1_Init(period);
+	
+	HAL_TIM_Base_Start_IT(&htim1);
+	
+
+
 }
+
+
 /* USER CODE END 4 */
 
 /**
