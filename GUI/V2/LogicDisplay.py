@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QLabel,
     QLineEdit,
+    QComboBox
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
@@ -214,11 +215,14 @@ class LogicDisplay(QMainWindow):
         self.sample_rate_label = QLabel("Sample Rate (Hz):")
         button_layout.addWidget(self.sample_rate_label, self.channels, 0)
 
-        self.sample_rate_input = QLineEdit()
-        self.sample_rate_input.setValidator(QIntValidator(0, 1000000))
-        self.sample_rate_input.setText("1000")
-        button_layout.addWidget(self.sample_rate_input, self.channels, 1)
-
+         # Create a QComboBox for sample rate selection
+        self.sample_rate_combo = QComboBox()
+        # Add options from 13 to 22
+        self.sample_rate_combo.addItems([str(i) for i in range(13, 23)])
+        button_layout.addWidget(self.sample_rate_combo, self.channels, 1)
+        
+        # Connect the currentIndexChanged signal to the send_sample_rate method
+        self.sample_rate_combo.currentIndexChanged.connect(self.send_sample_rate)
         # Create a horizontal layout for the Start/Stop and Single buttons
         control_buttons_layout = QHBoxLayout()
 
@@ -265,8 +269,39 @@ class LogicDisplay(QMainWindow):
             text_color = 'black' if self.is_light_color(color) else 'white'
             button.setStyleSheet(f"QPushButton {{ background-color: {color}; color: {text_color}; "
                                  f"border: 1px solid #555; border-radius: 5px; padding: 5px; }}")
+            self.send_channel_command(channel_idx)
+            
         else:
             button.setStyleSheet("")
+
+
+    def send_sample_rate(self):
+        # Get the sample rate from the input field
+        sample_rate = self.sample_rate_combo.currentText()
+        if sample_rate:
+            # Convert it to bytes and send it through serial
+            try:
+                command = str(sample_rate).encode('utf-8') # Convert to byte string
+                if self.worker.serial.is_open:
+                    self.worker.serial.write(command)
+                    print(f"Sent sample rate command: {sample_rate}")
+                else:
+                    print("Serial connection is not open")
+            except Exception as e:
+                print(f"Failed to send sample rate command: {str(e)}")
+
+    def send_channel_command(self, channel_idx):
+        if self.worker.serial.is_open:
+            try:
+                # Send the command (channel index from 0 to 7)
+                command =str(channel_idx + 4).encode('utf-8')  # Convert to byte string
+                print(command)
+                self.worker.serial.write(command)
+                print(f"Sent command {channel_idx + 4} to device")
+            except serial.SerialException as e:
+                print(f"Failed to send command {channel_idx+2}: {str(e)}")
+        else:
+            print("Serial connection is not open")
 
     def toggle_reading(self):
         if self.is_reading:
@@ -287,7 +322,6 @@ class LogicDisplay(QMainWindow):
         if self.worker.serial.is_open:
             try:
                 self.worker.serial.write(b'0')
-                self.worker.serial.write(b'0')
                 print("Sent 'start' command to device")
             except serial.SerialException as e:
                 print(f"Failed to send 'start' command: {str(e)}")
@@ -297,7 +331,7 @@ class LogicDisplay(QMainWindow):
     def send_stop_message(self):
         if self.worker.serial.is_open:
             try:
-                self.worker.serial.write(b'0')
+                
                 self.worker.serial.write(b'1')
                 print("Sent 'stop' command to device")
             except serial.SerialException as e:
