@@ -212,13 +212,13 @@ class LogicDisplay(QMainWindow):
             button_layout.addWidget(trigger_button, i, 1)
             self.trigger_mode_buttons.append(trigger_button)
 
-        self.sample_rate_label = QLabel("Sample Rate (Hz):")
+        self.sample_rate_label = QLabel("Sampling Modes:")
         button_layout.addWidget(self.sample_rate_label, self.channels, 0)
 
          # Create a QComboBox for sample rate selection
         self.sample_rate_combo = QComboBox()
         # Add options from 13 to 22
-        self.sample_rate_combo.addItems([str(i) for i in range(13, 23)])
+        self.sample_rate_combo.addItems([str(i) for i in range(0, 11)])
         button_layout.addWidget(self.sample_rate_combo, self.channels, 1)
         
         # Connect the currentIndexChanged signal to the send_sample_rate method
@@ -250,6 +250,23 @@ class LogicDisplay(QMainWindow):
         self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_modes)
         mode = self.trigger_modes[self.trigger_mode_indices[channel_idx]]
         self.trigger_mode_buttons[channel_idx].setText(mode)
+
+            # Send the appropriate command based on the trigger mode
+        if mode == 'Rising Edge':
+            command = b"2"  # Command for rising edge
+        elif mode == 'Falling Edge':
+            command = b"3"  # Command for falling edge
+        else:
+            command = None  # No trigger, don't send any command
+        
+        # Send the command if applicable
+        if command is not None and self.worker.serial.is_open:
+            try:
+                # Send the command to the device
+                self.worker.serial.write(command)
+                print(f"Sent command {command.decode('utf-8')} for {mode} on channel {channel_idx + 1}")
+            except serial.SerialException as e:
+                print(f"Failed to send {mode} command: {str(e)}")
         if self.worker:
             self.worker.set_trigger_mode(channel_idx, mode)
 
@@ -281,7 +298,7 @@ class LogicDisplay(QMainWindow):
         if sample_rate:
             # Convert it to bytes and send it through serial
             try:
-                command = str(sample_rate).encode('utf-8') # Convert to byte string
+                command = str(int(sample_rate) + 12).encode('utf-8') # Convert to byte string
                 if self.worker.serial.is_open:
                     self.worker.serial.write(command)
                     print(f"Sent sample rate command: {sample_rate}")
@@ -331,7 +348,6 @@ class LogicDisplay(QMainWindow):
     def send_stop_message(self):
         if self.worker.serial.is_open:
             try:
-                
                 self.worker.serial.write(b'1')
                 print("Sent 'stop' command to device")
             except serial.SerialException as e:
