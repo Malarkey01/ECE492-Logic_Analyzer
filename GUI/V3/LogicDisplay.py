@@ -145,9 +145,6 @@ class LogicDisplay(QMainWindow):
 
         self.is_single_capture = False  # Initialize single capture flag
 
-        self.bit0_list = []  # List to store bit 0 data
-        self.bit2_list = []  # List to store bit 2 data
-
         self.setup_ui()
 
         self.timer = QTimer()
@@ -335,19 +332,8 @@ class LogicDisplay(QMainWindow):
         self.toggle_button.setText("Start")
         self.single_button.setStyleSheet("")  # Reset to default style
 
-        # Write bits to output.txt
-        try:
-            with open('output.txt', 'w') as f:
-                for bit0, bit2 in zip(self.bit0_list, self.bit2_list):
-                    f.write(f"{bit0}\t{bit2}\n")
-            print("Bit 0 and Bit 2 data written to output.txt")
-        except Exception as e:
-            print(f"Failed to write to output.txt: {str(e)}")
-
     def clear_data_buffers(self):
         self.data_buffer = [[] for _ in range(self.channels)]
-        self.bit0_list = []  # Clear bit 0 data
-        self.bit2_list = []  # Clear bit 2 data
 
     def handle_data(self, data_list):
         if self.is_reading:
@@ -357,14 +343,8 @@ class LogicDisplay(QMainWindow):
                     self.data_buffer[i].append(bit_value)
                     if len(self.data_buffer[i]) > 1024:
                         self.data_buffer[i].pop(0)
-                # Extract bits 0 and 2 during single capture
-                if self.is_single_capture:
-                    bit0 = (data_value >> 0) & 1
-                    bit2 = (data_value >> 2) & 1
-                    self.bit0_list.append(bit0)
-                    self.bit2_list.append(bit2)
-                if self.is_single_capture and all(len(buf) >= 1024 for buf in self.data_buffer):
-                    self.stop_single_capture()
+            if self.is_single_capture and all(len(buf) >= 1024 for buf in self.data_buffer):
+                self.stop_single_capture()
 
     def update_plot(self):
         for i in range(self.channels):
