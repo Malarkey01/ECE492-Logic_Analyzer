@@ -45,6 +45,7 @@ int trigcounter = 0;
 enum triggerStates{triggerState, postTrigger, preTrigger};
 enum triggerStates state;
 int counter = 0;
+uint16_t triggerPeriod = 0x0000;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -54,7 +55,22 @@ uint16_t logicBuffer[20];
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+uint16_t BIT0  = 0x0001;
+uint16_t BIT1  = 0x0002;
+uint16_t BIT2  = 0x0004;
+uint16_t BIT3  = 0x0008;
+uint16_t BIT4  = 0x0010;
+uint16_t BIT5  = 0x0020;
+uint16_t BIT6  = 0x0040;
+uint16_t BIT7  = 0x0080;
+uint16_t BIT8  = 0x0100;
+uint16_t BIT9  = 0x0200;
+uint16_t BIT10 = 0x0400;
+uint16_t BIT11 = 0x0800;
+uint16_t BIT12 = 0x1000;
+uint16_t BIT13 = 0x2000;
+uint16_t BIT14 = 0x4000;
+uint16_t BIT15 = 0x8000;
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -358,36 +374,42 @@ uint16_t trigEdge; //Falling Edge
 int triggerCount = 300;
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-		if (htim == &htim1) {
+	if (htim == &htim16) {
+		trigger = 0;
+		state = postTrigger;
+		HAL_TIM_Base_Stop(&htim1);
+		HAL_TIM_Base_Stop(&htim16);
+	}
+	if (htim == &htim1) {
+//		if (trigger){
+//			counter++;
+//			if (counter == triggerCount){
+//				state = postTrigger;
+//				HAL_TIM_Base_Stop(&htim1);
+//			}
+//		}
+		if(!trigger) {
+			xorResult = GPIOB->IDR^buffer[bufferPointer];
+			uint16_t trigPinCheck = xorResult & trigPin;
+			uint16_t trigEdgeCheck = ~(buffer[bufferPointer]^trigEdge);
+			trigger = (trigPinCheck & trigEdgeCheck) > 0;
 			if (trigger){
-				counter++;
-				if (counter == triggerCount){
-					state = postTrigger;
-					HAL_TIM_Base_Stop(&htim1);
-				}
+				//start trigger timer
+//				counter = 0;
+				state = triggerState;
+				HAL_TIM_Base_Start_IT(&htim16);
 			}
-			else {
-				xorResult = GPIOB->IDR^buffer[bufferPointer];
-				uint16_t trigPinCheck = xorResult & trigPin;
-				uint16_t trigEdgeCheck = ~(buffer[bufferPointer]^trigEdge);
-				trigger = (trigPinCheck & trigEdgeCheck) > 0;
-				if (trigger){
-					counter = 0;
-					state = triggerState;
-				}
-					//HAL_TIM_Base_Start_IT(&htim16);
-			}
+		}
 
-			//add value to buffer
-			buffer[bufferPointer] = GPIOB->IDR;
-			//FIXME: increment pointer with circular logic using logic gates
-			bufferPointer++;
-			bufferPointer &= 0x03FF;
+		//add 8 bit logic input to buffer
+		buffer[bufferPointer] = GPIOB->IDR;
+		//increments pointer with circular logic using logic gates
+		bufferPointer++;
+		bufferPointer &= 0x03FF;
 //			if (bufferPointer > 1024){ // we can use and with 10 bits to with 0x03FF
 //				bufferPointer = 0;
 //			}
-		}
-
+	}
 }
 
 
@@ -565,6 +587,71 @@ void Process_USB_Command(char *cmd) {
 			change_period(Period_T1[9]);
 
 			break;
+		case 23:
+			triggerPeriod ^= BIT0;
+			change_period16(triggerPeriod);
+			break;
+		case 24:
+			triggerPeriod ^= BIT1;
+			change_period16(triggerPeriod);
+			break;
+		case 25:
+			triggerPeriod ^= BIT2;
+			change_period16(triggerPeriod);
+			break;
+		case 26:
+			triggerPeriod ^= BIT3;
+			change_period16(triggerPeriod);
+			break;
+		case 27:
+			triggerPeriod ^= BIT4;
+			change_period16(triggerPeriod);
+			break;
+		case 28:
+			triggerPeriod ^= BIT5;
+			change_period16(triggerPeriod);
+			break;
+		case 29:
+			triggerPeriod ^= BIT6;
+			change_period16(triggerPeriod);
+			break;
+		case 30:
+			triggerPeriod ^= BIT7;
+			change_period16(triggerPeriod);
+			break;
+		case 31:
+			triggerPeriod ^= BIT8;
+			change_period16(triggerPeriod);
+			break;
+		case 32:
+			triggerPeriod ^= BIT9;
+			change_period16(triggerPeriod);
+			break;
+		case 33:
+			triggerPeriod ^= BIT10;
+			change_period16(triggerPeriod);
+			break;
+		case 34:
+			triggerPeriod ^= BIT11;
+			change_period16(triggerPeriod);
+			break;
+		case 35:
+			triggerPeriod ^= BIT12;
+			change_period16(triggerPeriod);
+			break;
+		case 36:
+			triggerPeriod ^= BIT13;
+			change_period16(triggerPeriod);
+			break;
+		case 37:
+			triggerPeriod ^= BIT14;
+			change_period16(triggerPeriod);
+			break;
+		case 38:
+			triggerPeriod ^= BIT15;
+			change_period16(triggerPeriod);
+			break;
+
 		}		
 	}
 	//command state
@@ -599,11 +686,15 @@ void change_period(int period){
 	MX_TIM1_Init(period);
 	
 	HAL_TIM_Base_Start_IT(&htim1);
-	
-
-
 }
+void change_period16(uint16_t period){
 
+	HAL_TIM_Base_Stop(&htim16);
+
+	MX_TIM1_Init(period);
+	
+//	HAL_TIM_Base_Start_IT(&htim16);
+}
 
 /* USER CODE END 4 */
 
