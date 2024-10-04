@@ -18,7 +18,7 @@ from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 import pyqtgraph as pg
 import numpy as np
 from aesthetic import get_icon
-from InterfaceCommands import get_trigger_edge_command
+from InterfaceCommands import get_trigger_edge_command, get_trigger_pins_command
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -259,13 +259,23 @@ class LogicDisplay(QMainWindow):
 
     def send_trigger_edge_command(self):
         command_int = get_trigger_edge_command(self.current_trigger_modes)
-        command_char = str(command_int)
+        command_str = str(command_int)
         try:
-            self.worker.serial.write(command_char.encode('ascii'))
+            self.worker.serial.write(command_str.encode('ascii'))
             print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
-            print(f"Command Byte Value: {command_char.encode('ascii')}")
+            print(f"Command Byte Value: {command_str.encode('ascii')}")
         except serial.SerialException as e:
             print(f"Failed to send trigger edge command: {str(e)}")
+
+    def send_trigger_pins_command(self):
+        command_int = get_trigger_pins_command(self.current_trigger_modes)
+        command_str = str(command_int)
+        try:
+            self.worker.serial.write(command_str.encode('ascii'))
+            print(f"Sent trigger pins command: {command_int} ({bin(command_int)})")
+            print(f"Command Byte Value: {command_str.encode('ascii')}")
+        except serial.SerialException as e:
+            print(f"Failed to send trigger pins command: {str(e)}")
 
     def toggle_trigger_mode(self, channel_idx):
         self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_mode_options)
@@ -274,7 +284,8 @@ class LogicDisplay(QMainWindow):
         self.current_trigger_modes[channel_idx] = mode  # Update current trigger mode
         if self.worker:
             self.worker.set_trigger_mode(channel_idx, mode)
-        self.send_trigger_edge_command()  # Send the updated command
+        self.send_trigger_edge_command()   # Send the updated edge command
+        self.send_trigger_pins_command()   # Send the updated pins command
 
     def is_light_color(self, hex_color):
         hex_color = hex_color.lstrip('#')
