@@ -18,6 +18,7 @@ from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 import pyqtgraph as pg
 import numpy as np
 from aesthetic import get_icon
+from InterfaceCommands import get_trigger_edge_command
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -26,7 +27,7 @@ class SerialWorker(QThread):
         super().__init__()
         self.is_running = True
         self.channels = channels
-        self.trigger_modes = ['No Trigger'] * channels
+        self.trigger_modes = ['No Trigger'] * self.channels
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
@@ -145,6 +146,11 @@ class LogicDisplay(QMainWindow):
 
         self.is_single_capture = False  # Initialize single capture flag
 
+        # Initialize trigger modes per channel
+        self.current_trigger_modes = ['No Trigger'] * self.channels
+
+        self.trigger_mode_indices = [0] * self.channels  # Indices in ['No Trigger', 'Rising Edge', 'Falling Edge']
+
         self.setup_ui()
 
         self.timer = QTimer()
@@ -193,8 +199,7 @@ class LogicDisplay(QMainWindow):
 
         self.channel_buttons = []
         self.trigger_mode_buttons = []
-        self.trigger_modes = ['No Trigger', 'Rising Edge', 'Falling Edge']
-        self.trigger_mode_indices = [0] * self.channels
+        self.trigger_mode_options = ['No Trigger', 'Rising Edge', 'Falling Edge']
 
         for i in range(self.channels):
             label = f"DIO {i+1}"
@@ -206,7 +211,7 @@ class LogicDisplay(QMainWindow):
             button_layout.addWidget(button, i, 0)
             self.channel_buttons.append(button)
 
-            trigger_button = QPushButton(self.trigger_modes[self.trigger_mode_indices[i]])
+            trigger_button = QPushButton(self.trigger_mode_options[self.trigger_mode_indices[i]])
             trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx))
             button_layout.addWidget(trigger_button, i, 1)
             self.trigger_mode_buttons.append(trigger_button)
@@ -252,12 +257,24 @@ class LogicDisplay(QMainWindow):
 
         self.cursor.sigPositionChanged.connect(self.update_cursor_position)
 
+    def send_trigger_edge_command(self):
+        command_int = get_trigger_edge_command(self.current_trigger_modes)
+        command_char = str(command_int)
+        try:
+            self.worker.serial.write(command_char.encode('ascii'))
+            print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
+            print(f"Command Byte Value: {command_char.encode('ascii')}")
+        except serial.SerialException as e:
+            print(f"Failed to send trigger edge command: {str(e)}")
+
     def toggle_trigger_mode(self, channel_idx):
-        self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_modes)
-        mode = self.trigger_modes[self.trigger_mode_indices[channel_idx]]
+        self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_mode_options)
+        mode = self.trigger_mode_options[self.trigger_mode_indices[channel_idx]]
         self.trigger_mode_buttons[channel_idx].setText(mode)
+        self.current_trigger_modes[channel_idx] = mode  # Update current trigger mode
         if self.worker:
             self.worker.set_trigger_mode(channel_idx, mode)
+        self.send_trigger_edge_command()  # Send the updated command
 
     def is_light_color(self, hex_color):
         hex_color = hex_color.lstrip('#')
@@ -379,13 +396,6 @@ class LogicDisplay(QMainWindow):
         cursor_pos = self.cursor.pos().x()
         self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
         self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)
-
-    # def keyPressEvent(self, event):
-    #     if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
-    #         self.toggle_reading()
-    #         event.accept()
-    #     else:
-    #         super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
