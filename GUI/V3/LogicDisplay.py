@@ -272,10 +272,10 @@ class LogicDisplay(QMainWindow):
             lsb_str = str(lsb_value)
             if self.worker.serial.is_open:
                 # Send MSB value
-                self.worker.serial.write(msb_str.encode('ascii'))
+                self.worker.serial.write(msb_str.encode('utf-8'))
                 # print(f"Sent MSB value: {msb_value} ({msb_str.encode('ascii')})")
                 # Send LSB value
-                self.worker.serial.write(lsb_str.encode('ascii'))
+                self.worker.serial.write(lsb_str.encode('utf-8'))
                 # print(f"Sent LSB value: {lsb_value} ({lsb_str.encode('ascii')})")
             else:
                 print("Serial connection is not open")
@@ -286,9 +286,11 @@ class LogicDisplay(QMainWindow):
         command_int = get_trigger_edge_command(self.current_trigger_modes)
         command_str = str(command_int)
         try:
-            self.worker.serial.write(command_str.encode('ascii'))
-            # print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
-            # print(f"Command Byte Value: {command_str.encode('ascii')}")
+            self.worker.serial.write(b'2')
+            self.worker.serial.write(b'0')
+            self.worker.serial.write(command_str.encode('utf-8'))
+            print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
+            print(f"Command Byte Value: {command_str.encode('utf-8')}")
         except serial.SerialException as e:
             print(f"Failed to send trigger edge command: {str(e)}")
 
@@ -296,9 +298,11 @@ class LogicDisplay(QMainWindow):
         command_int = get_trigger_pins_command(self.current_trigger_modes)
         command_str = str(command_int)
         try:
-            self.worker.serial.write(command_str.encode('ascii'))
-            # print(f"Sent trigger pins command: {command_int} ({bin(command_int)})")
-            # print(f"Command Byte Value: {command_str.encode('ascii')}")
+            self.worker.serial.write(b'3')
+            self.worker.serial.write(b'0')
+            self.worker.serial.write(command_str.encode('utf-8'))
+            print(f"Sent trigger pins command: {command_int} ({bin(command_int)})")
+            print(f"Command Byte Value: {command_str.encode('utf-8')}")
         except serial.SerialException as e:
             print(f"Failed to send trigger pins command: {str(e)}")
 
@@ -350,6 +354,8 @@ class LogicDisplay(QMainWindow):
         if self.worker.serial.is_open:
             try:
                 self.worker.serial.write(b'0')
+                self.worker.serial.write(b'0')
+                self.worker.serial.write(b'0')
                 print("Sent 'start' command to device")
             except serial.SerialException as e:
                 print(f"Failed to send 'start' command: {str(e)}")
@@ -359,6 +365,8 @@ class LogicDisplay(QMainWindow):
     def send_stop_message(self):
         if self.worker.serial.is_open:
             try:
+                self.worker.serial.write(b'1')
+                self.worker.serial.write(b'1')
                 self.worker.serial.write(b'1')
                 print("Sent 'stop' command to device")
             except serial.SerialException as e:
