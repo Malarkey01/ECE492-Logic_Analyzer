@@ -24,6 +24,8 @@ from InterfaceCommands import (
     get_num_samples_command,
 )
 
+import time
+
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
 
@@ -287,7 +289,9 @@ class LogicDisplay(QMainWindow):
         command_str = str(command_int)
         try:
             self.worker.serial.write(b'2')
+            time.sleep(0.001)
             self.worker.serial.write(b'0')
+            time.sleep(0.001)
             self.worker.serial.write(command_str.encode('utf-8'))
             print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
             print(f"Command Byte Value: {command_str.encode('utf-8')}")
@@ -299,7 +303,9 @@ class LogicDisplay(QMainWindow):
         command_str = str(command_int)
         try:
             self.worker.serial.write(b'3')
+            time.sleep(0.001)
             self.worker.serial.write(b'0')
+            time.sleep(0.001)
             self.worker.serial.write(command_str.encode('utf-8'))
             print(f"Sent trigger pins command: {command_int} ({bin(command_int)})")
             print(f"Command Byte Value: {command_str.encode('utf-8')}")
@@ -354,7 +360,9 @@ class LogicDisplay(QMainWindow):
         if self.worker.serial.is_open:
             try:
                 self.worker.serial.write(b'0')
+                time.sleep(0.001)
                 self.worker.serial.write(b'0')
+                time.sleep(0.001)
                 self.worker.serial.write(b'0')
                 print("Sent 'start' command to device")
             except serial.SerialException as e:
@@ -366,7 +374,9 @@ class LogicDisplay(QMainWindow):
         if self.worker.serial.is_open:
             try:
                 self.worker.serial.write(b'1')
+                time.sleep(0.001)
                 self.worker.serial.write(b'1')
+                time.sleep(0.001)
                 self.worker.serial.write(b'1')
                 print("Sent 'stop' command to device")
             except serial.SerialException as e:
