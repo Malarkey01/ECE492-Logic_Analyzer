@@ -378,8 +378,8 @@ static void MX_GPIO_Init(void)
 /* USER CODE END MX_GPIO_Init_2 */
 }
 
-uint8_t trigPin = 0x01;
-uint8_t trigEdge = 0x01; //Falling Edge
+uint8_t trigPin = 0x00;
+uint8_t trigEdge = 0x00; //Falling Edge
 int triggerCount = 300;
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim){
@@ -416,46 +416,7 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim){
 
 
 }
-//void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-////	if (htim == &htim16) {
-////		trigger = 0;
-////		state = postTrigger;
-////		HAL_TIM_Base_Stop(&htim1);
-////		HAL_TIM_Base_Stop(&htim16);
-////	}
-//	if (htim == &htim2) {
-//		if (trigger){
-//			counter++;
-//			if (counter == triggerCount){
-//				state = postTrigger;
-//				HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-//			}
-//		}
-//		if(!trigger) {
-//			xorResult = GPIOB->IDR^buffer[bufferPointer];
-//			uint16_t trigPinCheck = xorResult & trigPin;
-//			uint16_t trigEdgeCheck = ~(buffer[bufferPointer]^trigEdge);
-//			trigger = (trigPinCheck & trigEdgeCheck) > 0;
-//			if (trigger){
-//				//start trigger timer
-//				counter = 0;
-//				//state = triggerState;
-//				HAL_TIM_PWM_Start_IT(&htim2,TIM_CHANNEL_1);
-//			}
-//		}
-//
-//		//add 8 bit logic input to buffer
-//		buffer[bufferPointer] = GPIOB->IDR;
-//		//increments pointer with circular logic using logic gates
-//		bufferPointer++;
-//		bufferPointer &= 0x03FF;
-////			if (bufferPointer > 1024){ // we can use and with 10 bits to with 0x03FF
-////				bufferPointer = 0;
-////			}
-//	}
-//}
-uint8_t trigPIN[8]={0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
-int Period_T1[10]={1000, 2000, 3000, 45000, 50000, 32000, 35000, 25000, 40000, 65536};
+
 uint8_t buff[100] ;
 int command = 0;
 int temp = 0;
@@ -464,14 +425,19 @@ uint16_t period16 = 0x0000;
 uint32_t period2 = 0x00000000;
 uint16_t period2LowerHalf = 0x0000;
 uint32_t period2UpperHalf = 0x00000000;
+int puff[100];
+int i = 0;
 void Process_USB_Command(char *cmd) {
+
+
 
 
 	commandValueFlag += 1;
 	if (commandValueFlag == 3)
 			commandValueFlag = 0;
-	if (commandValueFlag == 0)
+	if (commandValueFlag == 0){
 		command = atoi(cmd);
+	}
 	else{
 			switch(command){
 			case 0://start
@@ -482,10 +448,10 @@ void Process_USB_Command(char *cmd) {
 				trigger = 0;
 				HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
 				break;
-			case 2: //trigger Falling Edge
+			case 2: // set trig edge
 				trigEdge = atoi(cmd);
 				break;
-			case 3: //trigger Rising Edge;
+			case 3: // set trig pin
 				trigPin = atoi(cmd);
 				break;
 			case 4: //trigger PIN from 0 to 7
@@ -507,24 +473,6 @@ void Process_USB_Command(char *cmd) {
 				period2 &= 0xFFFF0000;
 				period2 |= period2LowerHalf;
 				change_period2(period2);
-				break;
-			case 7:
-				//trigPin = trigPIN[3];
-				break;
-			case 8:
-				//trigPin = trigPIN[4];
-				break;
-			case 9:
-				//trigPin = trigPIN[5];
-				break;
-			case 10:
-				//trigPin = trigPIN[6];
-				break;
-			case 11:
-				//trigPin = trigPIN[7];
-				break;
-			case 12:
-				//trigPin = trigPIN[8];
 				break;
 			}
 	}
