@@ -211,6 +211,7 @@ class LogicDisplay(QMainWindow):
             button_layout.addWidget(trigger_button, i, 1)
             self.trigger_mode_buttons.append(trigger_button)
 
+        # Sample Rate input
         self.sample_rate_label = QLabel("Sample Rate (Hz):")
         button_layout.addWidget(self.sample_rate_label, self.channels, 0)
 
@@ -218,6 +219,15 @@ class LogicDisplay(QMainWindow):
         self.sample_rate_input.setValidator(QIntValidator(0, 1000000))
         self.sample_rate_input.setText("1000")
         button_layout.addWidget(self.sample_rate_input, self.channels, 1)
+
+        # Number of Samples input
+        self.num_samples_label = QLabel("Number of Samples:")
+        button_layout.addWidget(self.num_samples_label, self.channels + 1, 0)
+
+        self.num_samples_input = QLineEdit()
+        self.num_samples_input.setValidator(QIntValidator(1, 1024))
+        self.num_samples_input.setText("300")
+        button_layout.addWidget(self.num_samples_input, self.channels + 1, 1)
 
         # Create a horizontal layout for the Start/Stop and Single buttons
         control_buttons_layout = QHBoxLayout()
@@ -231,7 +241,7 @@ class LogicDisplay(QMainWindow):
         control_buttons_layout.addWidget(self.single_button)
 
         # Add the control buttons layout to the button_layout
-        button_layout.addLayout(control_buttons_layout, self.channels + 1, 0, 1, 2)
+        button_layout.addLayout(control_buttons_layout, self.channels + 2, 0, 1, 2)
 
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
         self.plot.addItem(self.cursor)
@@ -370,12 +380,12 @@ class LogicDisplay(QMainWindow):
         self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
         self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)
 
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
-            self.toggle_reading()
-            event.accept()
-        else:
-            super().keyPressEvent(event)
+    # def keyPressEvent(self, event):
+    #     if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+    #         self.toggle_reading()
+    #         event.accept()
+    #     else:
+    #         super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
