@@ -158,7 +158,6 @@ class LogicDisplay(QMainWindow):
         self.trigger_mode_indices = [0] * self.channels  # Indices in ['No Trigger', 'Rising Edge', 'Falling Edge']
 
         self.setup_ui()
-
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_plot)
 
@@ -230,6 +229,7 @@ class LogicDisplay(QMainWindow):
         self.sample_rate_input.setValidator(QIntValidator(0, 1000000))
         self.sample_rate_input.setText("1000")
         button_layout.addWidget(self.sample_rate_input, self.channels, 1)
+        self.sample_rate_input.returnPressed.connect(self.handle_sample_rate_input)
 
         # Number of Samples input
         self.num_samples_label = QLabel("Number of Samples:")
@@ -265,7 +265,18 @@ class LogicDisplay(QMainWindow):
         self.update_cursor_position()
 
         self.cursor.sigPositionChanged.connect(self.update_cursor_position)
-
+    def handle_sample_rate_input(self):
+            try:
+                sample_rate = int(self.sample_rate_input.text())
+                if sample_rate <= 0:
+                    raise ValueError("Sample rate must be positive")
+                # Calculate period based on sample rate (microseconds)
+                #find period in ticks
+                period = (72*10**6)/sample_rate
+                print(period)
+                self.updateSampleTimer(int(period))
+            except ValueError as e:
+                print(f"Invalid sample rate: {e}")
     def send_num_samples_command(self):
         try:
             num_samples = int(self.num_samples_input.text())
@@ -289,12 +300,13 @@ class LogicDisplay(QMainWindow):
         command_str = str(command_int)
         try:
             self.worker.serial.write(b'2')
-            time.sleep(0.001)
+            time.sleep(0.01)
             self.worker.serial.write(b'0')
-            time.sleep(0.001)
+            time.sleep(0.01)
             self.worker.serial.write(command_str.encode('utf-8'))
-            print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
-            print(f"Command Byte Value: {command_str.encode('utf-8')}")
+            time.sleep(0.01)
+            # print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
+            # print(f"Command Byte Value: {command_str.encode('utf-8')}")
         except serial.SerialException as e:
             print(f"Failed to send trigger edge command: {str(e)}")
 
@@ -307,11 +319,43 @@ class LogicDisplay(QMainWindow):
             self.worker.serial.write(b'0')
             time.sleep(0.001)
             self.worker.serial.write(command_str.encode('utf-8'))
-            print(f"Sent trigger pins command: {command_int} ({bin(command_int)})")
-            print(f"Command Byte Value: {command_str.encode('utf-8')}")
+            # print(f"Sent trigger pins command: {command_int} ({bin(command_int)})")
+            # print(f"Command Byte Value: {command_str.encode('utf-8')}")
         except serial.SerialException as e:
             print(f"Failed to send trigger pins command: {str(e)}")
 
+    # period is a 32 bit integer 
+    def updateSampleTimer(self, period):
+        #send in command for upper half of period
+        self.worker.serial.write(b'5')
+        time.sleep(0.001)
+        #send first two hex bits
+        selectedBits = period >> 24
+        selectedBits = str(selectedBits).encode('utf-8')
+        self.worker.serial.write(selectedBits)
+        time.sleep(0.001)
+        #send next two hex bits
+        mask = 0x00FF0000
+        selectedBits = (period & mask)>>16
+        selectedBits = str(selectedBits).encode('utf-8')
+        self.worker.serial.write(selectedBits)
+        time.sleep(0.001)
+        #send in command for lower half of period
+        self.worker.serial.write(b'6')
+        time.sleep(0.001)
+        #send next two hex bits
+        mask = 0x0000FF00
+        selectedBits = (period & mask)>>8
+        selectedBits = str(selectedBits).encode('utf-8')
+        self.worker.serial.write(selectedBits)
+        time.sleep(0.001)
+        #send last two hex bits
+        mask = 0x000000FF
+        selectedBits = (period & mask)
+        selectedBits = str(selectedBits).encode('utf-8')
+        self.worker.serial.write(selectedBits)
+        time.sleep(0.001)
+        
     def toggle_trigger_mode(self, channel_idx):
         self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_mode_options)
         mode = self.trigger_mode_options[self.trigger_mode_indices[channel_idx]]
