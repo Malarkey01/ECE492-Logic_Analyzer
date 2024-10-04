@@ -18,6 +18,13 @@ from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 import pyqtgraph as pg
 import numpy as np
 from aesthetic import get_icon
+from InterfaceCommands import (
+    get_trigger_edge_command,
+    get_trigger_pins_command,
+    get_num_samples_command,
+)
+
+import time
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -26,7 +33,7 @@ class SerialWorker(QThread):
         super().__init__()
         self.is_running = True
         self.channels = channels
-        self.trigger_modes = ['No Trigger'] * channels
+        self.trigger_modes = ['No Trigger'] * self.channels
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
@@ -145,8 +152,12 @@ class LogicDisplay(QMainWindow):
 
         self.is_single_capture = False  # Initialize single capture flag
 
-        self.setup_ui()
+        # Initialize trigger modes per channel
+        self.current_trigger_modes = ['No Trigger'] * self.channels
 
+        self.trigger_mode_indices = [0] * self.channels  # Indices in ['No Trigger', 'Rising Edge', 'Falling Edge']
+
+        self.setup_ui()
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_plot)
 
@@ -193,8 +204,7 @@ class LogicDisplay(QMainWindow):
 
         self.channel_buttons = []
         self.trigger_mode_buttons = []
-        self.trigger_modes = ['No Trigger', 'Rising Edge', 'Falling Edge']
-        self.trigger_mode_indices = [0] * self.channels
+        self.trigger_mode_options = ['No Trigger', 'Rising Edge', 'Falling Edge']
 
         for i in range(self.channels):
             label = f"DIO {i+1}"
@@ -206,11 +216,12 @@ class LogicDisplay(QMainWindow):
             button_layout.addWidget(button, i, 0)
             self.channel_buttons.append(button)
 
-            trigger_button = QPushButton(self.trigger_modes[self.trigger_mode_indices[i]])
+            trigger_button = QPushButton(self.trigger_mode_options[self.trigger_mode_indices[i]])
             trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx))
             button_layout.addWidget(trigger_button, i, 1)
             self.trigger_mode_buttons.append(trigger_button)
 
+        # Sample Rate input
         self.sample_rate_label = QLabel("Sample Rate (Hz):")
         button_layout.addWidget(self.sample_rate_label, self.channels, 0)
 
@@ -218,6 +229,19 @@ class LogicDisplay(QMainWindow):
         self.sample_rate_input.setValidator(QIntValidator(0, 1000000))
         self.sample_rate_input.setText("1000")
         button_layout.addWidget(self.sample_rate_input, self.channels, 1)
+        self.sample_rate_input.returnPressed.connect(self.handle_sample_rate_input)
+
+        # Number of Samples input
+        self.num_samples_label = QLabel("Number of Samples:")
+        button_layout.addWidget(self.num_samples_label, self.channels + 1, 0)
+
+        self.num_samples_input = QLineEdit()
+        self.num_samples_input.setValidator(QIntValidator(1, 1023))
+        self.num_samples_input.setText("300")
+        button_layout.addWidget(self.num_samples_input, self.channels + 1, 1)
+
+        # Connect the returnPressed signal to send_num_samples_command
+        self.num_samples_input.returnPressed.connect(self.send_num_samples_command)
 
         # Create a horizontal layout for the Start/Stop and Single buttons
         control_buttons_layout = QHBoxLayout()
@@ -231,7 +255,7 @@ class LogicDisplay(QMainWindow):
         control_buttons_layout.addWidget(self.single_button)
 
         # Add the control buttons layout to the button_layout
-        button_layout.addLayout(control_buttons_layout, self.channels + 1, 0, 1, 2)
+        button_layout.addLayout(control_buttons_layout, self.channels + 2, 0, 1, 2)
 
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
         self.plot.addItem(self.cursor)
@@ -241,13 +265,106 @@ class LogicDisplay(QMainWindow):
         self.update_cursor_position()
 
         self.cursor.sigPositionChanged.connect(self.update_cursor_position)
+    def handle_sample_rate_input(self):
+            try:
+                sample_rate = int(self.sample_rate_input.text())
+                if sample_rate <= 0:
+                    raise ValueError("Sample rate must be positive")
+                # Calculate period based on sample rate (microseconds)
+                #find period in ticks
+                period = (72*10**6)/sample_rate
+                print(period)
+                self.updateSampleTimer(int(period))
+            except ValueError as e:
+                print(f"Invalid sample rate: {e}")
+    def send_num_samples_command(self):
+        try:
+            num_samples = int(self.num_samples_input.text())
+            msb_value, lsb_value = get_num_samples_command(num_samples)
+            msb_str = str(msb_value)
+            lsb_str = str(lsb_value)
+            if self.worker.serial.is_open:
+                # Send MSB value
+                self.worker.serial.write(msb_str.encode('utf-8'))
+                # print(f"Sent MSB value: {msb_value} ({msb_str.encode('ascii')})")
+                # Send LSB value
+                self.worker.serial.write(lsb_str.encode('utf-8'))
+                # print(f"Sent LSB value: {lsb_value} ({lsb_str.encode('ascii')})")
+            else:
+                print("Serial connection is not open")
+        except ValueError as e:
+            print(f"Invalid number of samples: {e}")
 
+    def send_trigger_edge_command(self):
+        command_int = get_trigger_edge_command(self.current_trigger_modes)
+        command_str = str(command_int)
+        try:
+            self.worker.serial.write(b'2')
+            time.sleep(0.01)
+            self.worker.serial.write(b'0')
+            time.sleep(0.01)
+            self.worker.serial.write(command_str.encode('utf-8'))
+            time.sleep(0.01)
+            # print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
+            # print(f"Command Byte Value: {command_str.encode('utf-8')}")
+        except serial.SerialException as e:
+            print(f"Failed to send trigger edge command: {str(e)}")
+
+    def send_trigger_pins_command(self):
+        command_int = get_trigger_pins_command(self.current_trigger_modes)
+        command_str = str(command_int)
+        try:
+            self.worker.serial.write(b'3')
+            time.sleep(0.001)
+            self.worker.serial.write(b'0')
+            time.sleep(0.001)
+            self.worker.serial.write(command_str.encode('utf-8'))
+            # print(f"Sent trigger pins command: {command_int} ({bin(command_int)})")
+            # print(f"Command Byte Value: {command_str.encode('utf-8')}")
+        except serial.SerialException as e:
+            print(f"Failed to send trigger pins command: {str(e)}")
+
+    # period is a 32 bit integer 
+    def updateSampleTimer(self, period):
+        #send in command for upper half of period
+        self.worker.serial.write(b'5')
+        time.sleep(0.001)
+        #send first two hex bits
+        selectedBits = period >> 24
+        selectedBits = str(selectedBits).encode('utf-8')
+        self.worker.serial.write(selectedBits)
+        time.sleep(0.001)
+        #send next two hex bits
+        mask = 0x00FF0000
+        selectedBits = (period & mask)>>16
+        selectedBits = str(selectedBits).encode('utf-8')
+        self.worker.serial.write(selectedBits)
+        time.sleep(0.001)
+        #send in command for lower half of period
+        self.worker.serial.write(b'6')
+        time.sleep(0.001)
+        #send next two hex bits
+        mask = 0x0000FF00
+        selectedBits = (period & mask)>>8
+        selectedBits = str(selectedBits).encode('utf-8')
+        self.worker.serial.write(selectedBits)
+        time.sleep(0.001)
+        #send last two hex bits
+        mask = 0x000000FF
+        selectedBits = (period & mask)
+        selectedBits = str(selectedBits).encode('utf-8')
+        self.worker.serial.write(selectedBits)
+        time.sleep(0.001)
+        
     def toggle_trigger_mode(self, channel_idx):
-        self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_modes)
-        mode = self.trigger_modes[self.trigger_mode_indices[channel_idx]]
+        self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_mode_options)
+        mode = self.trigger_mode_options[self.trigger_mode_indices[channel_idx]]
         self.trigger_mode_buttons[channel_idx].setText(mode)
+        self.current_trigger_modes[channel_idx] = mode  # Update current trigger mode
         if self.worker:
             self.worker.set_trigger_mode(channel_idx, mode)
+        self.send_trigger_edge_command()   # Send the updated edge command
+        self.send_trigger_pins_command()   # Send the updated pins command
 
     def is_light_color(self, hex_color):
         hex_color = hex_color.lstrip('#')
@@ -287,6 +404,10 @@ class LogicDisplay(QMainWindow):
         if self.worker.serial.is_open:
             try:
                 self.worker.serial.write(b'0')
+                time.sleep(0.001)
+                self.worker.serial.write(b'0')
+                time.sleep(0.001)
+                self.worker.serial.write(b'0')
                 print("Sent 'start' command to device")
             except serial.SerialException as e:
                 print(f"Failed to send 'start' command: {str(e)}")
@@ -296,6 +417,10 @@ class LogicDisplay(QMainWindow):
     def send_stop_message(self):
         if self.worker.serial.is_open:
             try:
+                self.worker.serial.write(b'1')
+                time.sleep(0.001)
+                self.worker.serial.write(b'1')
+                time.sleep(0.001)
                 self.worker.serial.write(b'1')
                 print("Sent 'stop' command to device")
             except serial.SerialException as e:
@@ -369,13 +494,6 @@ class LogicDisplay(QMainWindow):
         cursor_pos = self.cursor.pos().x()
         self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
         self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)
-
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
-            self.toggle_reading()
-            event.accept()
-        else:
-            super().keyPressEvent(event)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
