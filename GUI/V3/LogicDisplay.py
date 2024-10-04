@@ -18,7 +18,11 @@ from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 import pyqtgraph as pg
 import numpy as np
 from aesthetic import get_icon
-from InterfaceCommands import get_trigger_edge_command, get_trigger_pins_command
+from InterfaceCommands import (
+    get_trigger_edge_command,
+    get_trigger_pins_command,
+    get_num_samples_command,
+)
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -230,9 +234,12 @@ class LogicDisplay(QMainWindow):
         button_layout.addWidget(self.num_samples_label, self.channels + 1, 0)
 
         self.num_samples_input = QLineEdit()
-        self.num_samples_input.setValidator(QIntValidator(1, 1024))
+        self.num_samples_input.setValidator(QIntValidator(1, 1023))
         self.num_samples_input.setText("300")
         button_layout.addWidget(self.num_samples_input, self.channels + 1, 1)
+
+        # Connect the returnPressed signal to send_num_samples_command
+        self.num_samples_input.returnPressed.connect(self.send_num_samples_command)
 
         # Create a horizontal layout for the Start/Stop and Single buttons
         control_buttons_layout = QHBoxLayout()
@@ -257,13 +264,31 @@ class LogicDisplay(QMainWindow):
 
         self.cursor.sigPositionChanged.connect(self.update_cursor_position)
 
+    def send_num_samples_command(self):
+        try:
+            num_samples = int(self.num_samples_input.text())
+            msb_value, lsb_value = get_num_samples_command(num_samples)
+            msb_str = str(msb_value)
+            lsb_str = str(lsb_value)
+            if self.worker.serial.is_open:
+                # Send MSB value
+                self.worker.serial.write(msb_str.encode('ascii'))
+                # print(f"Sent MSB value: {msb_value} ({msb_str.encode('ascii')})")
+                # Send LSB value
+                self.worker.serial.write(lsb_str.encode('ascii'))
+                # print(f"Sent LSB value: {lsb_value} ({lsb_str.encode('ascii')})")
+            else:
+                print("Serial connection is not open")
+        except ValueError as e:
+            print(f"Invalid number of samples: {e}")
+
     def send_trigger_edge_command(self):
         command_int = get_trigger_edge_command(self.current_trigger_modes)
         command_str = str(command_int)
         try:
             self.worker.serial.write(command_str.encode('ascii'))
-            print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
-            print(f"Command Byte Value: {command_str.encode('ascii')}")
+            # print(f"Sent trigger edge command: {command_int} ({bin(command_int)})")
+            # print(f"Command Byte Value: {command_str.encode('ascii')}")
         except serial.SerialException as e:
             print(f"Failed to send trigger edge command: {str(e)}")
 
@@ -272,8 +297,8 @@ class LogicDisplay(QMainWindow):
         command_str = str(command_int)
         try:
             self.worker.serial.write(command_str.encode('ascii'))
-            print(f"Sent trigger pins command: {command_int} ({bin(command_int)})")
-            print(f"Command Byte Value: {command_str.encode('ascii')}")
+            # print(f"Sent trigger pins command: {command_int} ({bin(command_int)})")
+            # print(f"Command Byte Value: {command_str.encode('ascii')}")
         except serial.SerialException as e:
             print(f"Failed to send trigger pins command: {str(e)}")
 
