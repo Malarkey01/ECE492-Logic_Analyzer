@@ -226,7 +226,7 @@ class LogicDisplay(QMainWindow):
         button_layout.addWidget(self.sample_rate_label, self.channels, 0)
 
         self.sample_rate_input = QLineEdit()
-        self.sample_rate_input.setValidator(QIntValidator(0, 1000000))
+        self.sample_rate_input.setValidator(QIntValidator(0, 5000000))
         self.sample_rate_input.setText("1000")
         button_layout.addWidget(self.sample_rate_input, self.channels, 1)
         self.sample_rate_input.returnPressed.connect(self.handle_sample_rate_input)
