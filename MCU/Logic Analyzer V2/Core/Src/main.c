@@ -49,6 +49,7 @@ enum triggerStates{triggerState, postTrigger, preTrigger};
 enum triggerStates state;
 int counter = 0;
 uint16_t triggerPeriod = 0x0000;
+int trigPointer = 0;
 #define MAX_VALUES 2  // Number of values associated with each command
 #define MAX_CMD_LENGTH 64  // Maximum command string length
 /* Private define ------------------------------------------------------------*/
@@ -139,6 +140,7 @@ int main(void)
   	  	  		 HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
   	  	  		 trigger = 0;
   	  	  		 //Send_Large_USB_Data((void*)buffer, 150 * sizeof(uint16_t));
+
   	  	  		 sprintf(msg, "%hu\r\n", buffer[val]);
   	  	  		 CDC_Transmit_FS((uint8_t *)msg, strlen(msg));
   	  	  		 HAL_Delay(1);
@@ -146,10 +148,10 @@ int main(void)
 
   	  	  		 if(val == 1024){
   	  	  			 val = 0;
-
-  	  	  			HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
-  	  	  			state = preTrigger;
-
+  	  	  			 sprintf(msg, "%hu\r\n", trigPointer);
+  	  	  		  	 CDC_Transmit_FS((uint8_t *)msg, strlen(msg));
+  	  	  			 HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
+  	  	  			 state = preTrigger;
   	  	  		 }
   	  	  			break;
 
@@ -279,16 +281,13 @@ static void MX_TIM16_Init(uint16_t period)
 
   /* USER CODE END TIM16_Init 0 */
 
-  TIM_OC_InitTypeDef sConfigOC = {0};
-  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
-
   /* USER CODE BEGIN TIM16_Init 1 */
 
   /* USER CODE END TIM16_Init 1 */
   htim16.Instance = TIM16;
-  htim16.Init.Prescaler = 1;
+  htim16.Init.Prescaler = 0;
   htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim16.Init.Period = period-1;
+  htim16.Init.Period = 65535;
   htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim16.Init.RepetitionCounter = 0;
   htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -296,35 +295,8 @@ static void MX_TIM16_Init(uint16_t period)
   {
     Error_Handler();
   }
-  if (HAL_TIM_PWM_Init(&htim16) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_PWM_ConfigChannel(&htim16, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
-  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 0;
-  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
-  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
-  sBreakDeadTimeConfig.BreakFilter = 0;
-  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
-  if (HAL_TIMEx_ConfigBreakDeadTime(&htim16, &sBreakDeadTimeConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
   /* USER CODE BEGIN TIM16_Init 2 */
-
+  __HAL_TIM_ENABLE_IT(&htim16, TIM_IT_UPDATE);
   /* USER CODE END TIM16_Init 2 */
 
 }
@@ -381,16 +353,20 @@ static void MX_GPIO_Init(void)
 uint8_t trigPin = 0x00;
 uint8_t trigEdge = 0x00; //Falling Edge
 int triggerCount = 300;
+int Cutter=0;
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+
+	if(htim == &htim16){
+
+		state = postTrigger;
+		HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+		HAL_TIM_Base_Stop(&htim16);
+	}
+
+	}
 
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim){
 	if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
-		if (trigger){
-				counter++;
-				if (counter == triggerCount){
-					state = postTrigger;
-					HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
-				}
-			}
 			if(!trigger) {
 				xorResult = GPIOB->IDR^buffer[bufferPointer];
 				uint16_t trigPinCheck = xorResult & trigPin;
@@ -399,18 +375,16 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim){
 				if (trigger){
 					counter = 0;
 					state = triggerState;
+					trigPointer = bufferPointer;
 					//start timer 16
+					HAL_TIM_Base_Start_IT(&htim16);
 				}
 			}
-
 			//add 8 bit logic input to buffer
 			buffer[bufferPointer] = GPIOB->IDR & 0xFFFF;
 			//increments pointer with circular logic using logic gates
 			bufferPointer++;
 			bufferPointer &= 0x03FF;
-	//			if (bufferPointer > 1024){ // we can use and with 10 bits to with 0x03FF
-	//				bufferPointer = 0;
-	//			}
 	}
 
 
