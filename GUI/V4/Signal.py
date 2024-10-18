@@ -154,6 +154,9 @@ class SignalDisplay(QWidget):
 
         self.trigger_mode_indices = [0] * self.channels  # Indices in ['No Trigger', 'Rising Edge', 'Falling Edge']
 
+        # Initialize sample_rate
+        self.sample_rate = 1000  # Default sample rate in Hz
+
         self.setup_ui()
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_plot)
@@ -172,9 +175,9 @@ class SignalDisplay(QWidget):
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
-        # Set x-axis to show all 1024 data points
-        self.plot.setXRange(0, 200, padding=0)
-        self.plot.setLimits(xMin=0, xMax=1024)
+        # Set x-axis to show time units based on sample rate
+        self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
+        self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
@@ -183,6 +186,8 @@ class SignalDisplay(QWidget):
         self.plot.getAxis('left').setTicks([])
         self.plot.getAxis('left').setStyle(showValues=False)
         self.plot.getAxis('left').setPen(None)
+
+        self.plot.setLabel('bottom', 'Time', units='s')  # Label the x-axis as time
 
         self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
         self.curves = []
@@ -219,7 +224,7 @@ class SignalDisplay(QWidget):
         button_layout.addWidget(self.sample_rate_label, self.channels, 0)
 
         self.sample_rate_input = QLineEdit()
-        self.sample_rate_input.setValidator(QIntValidator(0, 5000000))
+        self.sample_rate_input.setValidator(QIntValidator(1, 5000000))
         self.sample_rate_input.setText("1000")
         button_layout.addWidget(self.sample_rate_input, self.channels, 1)
         self.sample_rate_input.returnPressed.connect(self.handle_sample_rate_input)
@@ -264,11 +269,14 @@ class SignalDisplay(QWidget):
             sample_rate = int(self.sample_rate_input.text())
             if sample_rate <= 0:
                 raise ValueError("Sample rate must be positive")
-            # Calculate period based on sample rate (microseconds)
-            # find period in ticks
+            self.sample_rate = sample_rate  # Store sample_rate
+            # Calculate period based on sample rate
             period = (72 * 10**6) / sample_rate
-            print(period)
+            print(f"Sample Rate set to {sample_rate} Hz, Period: {period} ticks")
             self.updateSampleTimer(int(period))
+            # Update x-axis range
+            self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
+            self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
         except ValueError as e:
             print(f"Invalid sample rate: {e}")
 
@@ -313,37 +321,40 @@ class SignalDisplay(QWidget):
         except serial.SerialException as e:
             print(f"Failed to send trigger pins command: {str(e)}")
 
-    # period is a 32 bit integer
+    # period is a 32-bit integer
     def updateSampleTimer(self, period):
-        # Send in command for upper half of period
-        self.worker.serial.write(b'5')
-        time.sleep(0.001)
-        # Send first two hex bits
-        selectedBits = period >> 24
-        selectedBits = str(selectedBits).encode('utf-8')
-        self.worker.serial.write(selectedBits)
-        time.sleep(0.001)
-        # Send next two hex bits
-        mask = 0x00FF0000
-        selectedBits = (period & mask) >> 16
-        selectedBits = str(selectedBits).encode('utf-8')
-        self.worker.serial.write(selectedBits)
-        time.sleep(0.001)
-        # Send in command for lower half of period
-        self.worker.serial.write(b'6')
-        time.sleep(0.001)
-        # Send next two hex bits
-        mask = 0x0000FF00
-        selectedBits = (period & mask) >> 8
-        selectedBits = str(selectedBits).encode('utf-8')
-        self.worker.serial.write(selectedBits)
-        time.sleep(0.001)
-        # Send last two hex bits
-        mask = 0x000000FF
-        selectedBits = (period & mask)
-        selectedBits = str(selectedBits).encode('utf-8')
-        self.worker.serial.write(selectedBits)
-        time.sleep(0.001)
+        try:
+            # Send in command for upper half of period
+            self.worker.serial.write(b'5')
+            time.sleep(0.001)
+            # Send first two hex bits
+            selectedBits = period >> 24
+            selectedBits = str(selectedBits).encode('utf-8')
+            self.worker.serial.write(selectedBits)
+            time.sleep(0.001)
+            # Send next two hex bits
+            mask = 0x00FF0000
+            selectedBits = (period & mask) >> 16
+            selectedBits = str(selectedBits).encode('utf-8')
+            self.worker.serial.write(selectedBits)
+            time.sleep(0.001)
+            # Send in command for lower half of period
+            self.worker.serial.write(b'6')
+            time.sleep(0.001)
+            # Send next two hex bits
+            mask = 0x0000FF00
+            selectedBits = (period & mask) >> 8
+            selectedBits = str(selectedBits).encode('utf-8')
+            self.worker.serial.write(selectedBits)
+            time.sleep(0.001)
+            # Send last two hex bits
+            mask = 0x000000FF
+            selectedBits = (period & mask)
+            selectedBits = str(selectedBits).encode('utf-8')
+            self.worker.serial.write(selectedBits)
+            time.sleep(0.001)
+        except Exception as e:
+            print(f"Failed to update sample timer: {e}")
 
     def toggle_trigger_mode(self, channel_idx):
         self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_mode_options)
@@ -464,11 +475,12 @@ class SignalDisplay(QWidget):
         for i in range(self.channels):
             if self.channel_visibility[i]:
                 inverted_index = self.channels - i - 1
-                t = np.arange(len(self.data_buffer[i]))
-                if len(t) > 1:
+                num_samples = len(self.data_buffer[i])
+                if num_samples > 1:
+                    t = np.arange(num_samples) / self.sample_rate  # Time in seconds
                     square_wave_time = []
                     square_wave_data = []
-                    for j in range(1, len(t)):
+                    for j in range(1, num_samples):
                         square_wave_time.extend([t[j-1], t[j]])
                         square_wave_data.extend([
                             self.data_buffer[i][j-1] + inverted_index * 2,
@@ -481,7 +493,7 @@ class SignalDisplay(QWidget):
 
     def update_cursor_position(self):
         cursor_pos = self.cursor.pos().x()
-        self.cursor_label.setText(f"Cursor: {cursor_pos:.2f}")
+        self.cursor_label.setText(f"Cursor: {cursor_pos:.6f} s")
         self.cursor_label.setPos(cursor_pos, self.channels * 2 - 1)
 
     def closeEvent(self, event):

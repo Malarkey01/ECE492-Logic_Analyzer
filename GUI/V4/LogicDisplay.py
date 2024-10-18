@@ -22,6 +22,7 @@ class LogicDisplay(QMainWindow):
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
         self.port = port
+        self.default_baudrate = baudrate  # Store default baud rate
         self.baudrate = baudrate
         self.channels = channels
 
@@ -66,29 +67,34 @@ class LogicDisplay(QMainWindow):
             self.current_module.deleteLater()
             self.current_module = None
 
+        # Reset baud rate to default when switching modes
+        if module_name != 'UART':
+            self.baudrate = self.default_baudrate
+
         # Load the selected module
         if module_name == 'Signal':
             self.current_module = SignalDisplay(self.port, self.baudrate, self.channels)
         elif module_name == 'I2C':
             self.current_module = I2CDisplay(self.port, self.baudrate)
-            pass
         elif module_name == 'SPI':
             self.current_module = SPIDisplay(self.port, self.baudrate)
-            pass
         elif module_name == 'UART':
-            # Placeholder for UART module
+            # Update baud rate if changed in UART mode
             self.current_module = UARTDisplay(self.port, self.baudrate)
-            pass
+            self.current_module.baudrate_changed.connect(self.update_baudrate)
 
         if self.current_module:
             self.setCentralWidget(self.current_module)
             self.current_module.show()
         else:
-            # If the module is not implemented yet
+            # Placeholder if the module is not implemented
             placeholder_widget = QWidget()
             placeholder_layout = QVBoxLayout(placeholder_widget)
             placeholder_layout.addWidget(QWidget())
             self.setCentralWidget(placeholder_widget)
+
+    def update_baudrate(self, baudrate):
+        self.baudrate = baudrate
 
     def closeEvent(self, event):
         if self.current_module:
