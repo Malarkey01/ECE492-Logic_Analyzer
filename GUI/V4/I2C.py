@@ -108,46 +108,35 @@ class FixedYViewBox(pg.ViewBox):
         super(FixedYViewBox, self).__init__(*args, **kwargs)
 
     def scaleBy(self, s=None, center=None, x=None, y=None):
-        # Handle scaling factors
-        if s is not None:
-            if isinstance(s, dict):
-                x = s.get('x', x)
-                y = s.get('y', y)
+        y = 1.0  # Fix y-scaling
+        if x is not None:
+            pass
+        else:
+            if s is None:
+                x = 1.0
+            elif isinstance(s, dict):
+                x = s.get('x', 1.0)
             elif isinstance(s, (list, tuple)):
-                if len(s) == 2:
-                    x, y_s = s
-                    y = 1.0  # Fix y-scaling
-                elif len(s) == 1:
-                    x = s[0]
-                    y = 1.0  # Fix y-scaling
-                else:
-                    x = s
-                    y = 1.0  # Fix y-scaling
+                x = s[0]
             else:
                 x = s
-                y = 1.0  # Fix y-scaling
-        else:
-            y = 1.0  # Fix y-scaling
-            x = 1.0 if x is None else x
-
         super(FixedYViewBox, self).scaleBy(x=x, y=y, center=center)
 
-    def mouseDragEvent(self, ev, axis=None):
-        # Override to prevent vertical panning
-        if ev.button() == Qt.MouseButton.LeftButton:
-            ev.ignore()
-            if axis is None or axis == 'x':
-                ev.accept()
-                self.translateBy(x=-ev.delta()[0] * self.state['mouseEnabled'][0], y=0)
+    def translateBy(self, t=None, x=None, y=None):
+        y = 0.0  # Fix y-translation
+        if x is not None:
+            pass
         else:
-            super(FixedYViewBox, self).mouseDragEvent(ev, axis=axis)
+            if t is None:
+                x = 0.0
+            elif isinstance(t, dict):
+                x = t.get('x', 0.0)
+            elif isinstance(t, (list, tuple)):
+                x = t[0]
+            else:
+                x = t
+        super(FixedYViewBox, self).translateBy(x=x, y=y)
 
-    def wheelEvent(self, ev, axis=None):
-        # Override to prevent vertical zooming
-        if axis is None or axis == 'x':
-            super(FixedYViewBox, self).wheelEvent(ev, axis=axis)
-        else:
-            ev.ignore()
 
 class EditableButton(QPushButton):
     def __init__(self, label, parent=None):
