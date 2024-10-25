@@ -21,10 +21,10 @@ from aesthetic import get_icon
 from InterfaceCommands import (
     get_trigger_edge_command,
     get_trigger_pins_command,
-    get_num_samples_command,
 )
 
 import time
+import math
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -140,6 +140,8 @@ class EditableButton(QPushButton):
 class SignalDisplay(QWidget):
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
+        self.period = 0
+        self.num_samples = 0
         self.port = port
         self.baudrate = baudrate
         self.channels = channels
@@ -283,16 +285,15 @@ class SignalDisplay(QWidget):
     def send_num_samples_command(self):
         try:
             num_samples = int(self.num_samples_input.text())
-            msb_value, lsb_value = get_num_samples_command(num_samples)
-            msb_str = str(msb_value)
-            lsb_str = str(lsb_value)
-            if self.worker.serial.is_open:
-                # Send MSB value
-                self.worker.serial.write(msb_str.encode('utf-8'))
-                # Send LSB value
-                self.worker.serial.write(lsb_str.encode('utf-8'))
-            else:
-                print("Serial connection is not open")
+            self.num_samples = num_samples
+            self.updateTriggerTimer()
+            # if self.worker.serial.is_open:
+            #     # Send MSB value
+            #     self.worker.serial.write(msb_str.encode('utf-8'))
+            #     # Send LSB value
+            #     self.worker.serial.write(lsb_str.encode('utf-8'))
+            # else:
+            #     print("Serial connection is not open")
         except ValueError as e:
             print(f"Invalid number of samples: {e}")
 
@@ -323,6 +324,7 @@ class SignalDisplay(QWidget):
 
     # period is a 32-bit integer
     def updateSampleTimer(self, period):
+        self.period = period
         try:
             # Send in command for upper half of period
             self.worker.serial.write(b'5')
@@ -355,6 +357,50 @@ class SignalDisplay(QWidget):
             time.sleep(0.001)
         except Exception as e:
             print(f"Failed to update sample timer: {e}")
+            
+    def updateTriggerTimer(self):
+        samplingFreq = 72e6 / self.period
+        trigFreq = samplingFreq / self.num_samples
+        period16 = 72e6 / trigFreq
+        prescalar = 1
+        if(period16 > 2**16):
+            prescalar = math.ceil(period16 /(2**16))
+            period16 = int((72e6 / prescalar) / trigFreq)
+        try:
+            # Send in command for lower half of period
+            self.worker.serial.write(b'4')
+            time.sleep(0.01)
+            # Send two hex bits
+            mask = 0xFF00
+            selectedBits = (period16 & mask) >> 8
+            selectedBits = str(selectedBits).encode('utf-8')
+            self.worker.serial.write(selectedBits)
+            time.sleep(0.01)
+            # Send last two hex bits
+            mask = 0x00FF
+            selectedBits = (period16 & mask)
+            selectedBits = str(selectedBits).encode('utf-8')
+            self.worker.serial.write(selectedBits)
+            time.sleep(0.01)
+            #update Prescalar
+            # Send in command for lower half of period
+            self.worker.serial.write(b'7')
+            time.sleep(0.01)
+            # Send two hex bits
+            mask = 0xFF00
+            selectedBits = (prescalar & mask) >> 8
+            selectedBits = str(selectedBits).encode('utf-8')
+            self.worker.serial.write(selectedBits)
+            time.sleep(0.01)
+            # Send last two hex bits
+            mask = 0x00FF
+            selectedBits = (prescalar & mask)
+            selectedBits = str(selectedBits).encode('utf-8')
+            self.worker.serial.write(selectedBits)
+            time.sleep(0.01)
+        except Exception as e:
+            print(f"Failed to update trigger timer: {e}")
+        
 
     def toggle_trigger_mode(self, channel_idx):
         self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_mode_options)
