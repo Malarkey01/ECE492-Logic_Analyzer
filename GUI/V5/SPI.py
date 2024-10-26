@@ -2,6 +2,10 @@
 
 import sys
 import serial
+import math
+import time
+import numpy as np
+import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -16,16 +20,12 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
-import pyqtgraph as pg
-import numpy as np
-import time
-
-# **Add the missing import statement here**
 from InterfaceCommands import (
     get_trigger_edge_command,
     get_trigger_pins_command,
-    get_num_samples_command,
 )
+from aesthetic import get_icon
+
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -73,15 +73,7 @@ class SerialWorker(QThread):
 
                                     # Determine which channel to use for trigger
                                     trigger_channel = self.trigger_channels[i]
-                                    if trigger_channel == 'MISO':
-                                        bit_idx = 0
-                                    elif trigger_channel == 'MOSI':
-                                        bit_idx = 1
-                                    elif trigger_channel == 'SS':
-                                        bit_idx = 2
-                                    elif trigger_channel == 'SCLK':
-                                        bit_idx = 3
-
+                                    bit_idx = self.trigger_channel_options.index(trigger_channel)
                                     current_line = (current_bits >> bit_idx) & 1
                                     last_line = (last_bits >> bit_idx) & 1
                                     channel_idx = 4 * i + bit_idx
@@ -106,15 +98,14 @@ class SerialWorker(QThread):
         if self.serial.is_open:
             self.serial.close()
 
+
 class FixedYViewBox(pg.ViewBox):
     def __init__(self, *args, **kwargs):
         super(FixedYViewBox, self).__init__(*args, **kwargs)
 
     def scaleBy(self, s=None, center=None, x=None, y=None):
-        y = 1.0  # Fix y-scaling
-        if x is not None:
-            pass
-        else:
+        y = 1.0
+        if x is None:
             if s is None:
                 x = 1.0
             elif isinstance(s, dict):
@@ -126,10 +117,8 @@ class FixedYViewBox(pg.ViewBox):
         super(FixedYViewBox, self).scaleBy(x=x, y=y, center=center)
 
     def translateBy(self, t=None, x=None, y=None):
-        y = 0.0  # Fix y-translation
-        if x is not None:
-            pass
-        else:
+        y = 0.0
+        if x is None:
             if t is None:
                 x = 0.0
             elif isinstance(t, dict):
@@ -139,6 +128,7 @@ class FixedYViewBox(pg.ViewBox):
             else:
                 x = t
         super(FixedYViewBox, self).translateBy(x=x, y=y)
+
 
 
 class EditableButton(QPushButton):
@@ -162,9 +152,12 @@ class EditableButton(QPushButton):
         elif action == reset_action:
             self.setText(self.default_label)
 
+
 class SPIDisplay(QWidget):
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
+        self.period = 0
+        self.num_samples = 0
         self.port = port
         self.baudrate = baudrate
         self.channels = channels
@@ -172,15 +165,14 @@ class SPIDisplay(QWidget):
         self.data_buffer = [[] for _ in range(8)]  # 8 channels
         self.channel_visibility = [False] * 8  # Visibility for each channel
 
-        self.is_single_capture = False  # Initialize single capture flag
+        self.is_single_capture = False
 
-        # Initialize trigger modes per channel
         self.current_trigger_modes = ['No Trigger'] * 8
-        # Default trigger channels per group (MISO)
         self.trigger_channels = ['MISO'] * 2
-
         self.trigger_mode_options = ['No Trigger', 'Rising Edge', 'Falling Edge']
         self.trigger_channel_options = ['MISO', 'MOSI', 'SS', 'SCLK']
+
+        self.sample_rate = 1000  # Default sample rate in Hz
 
         self.setup_ui()
         self.timer = QTimer()
@@ -200,20 +192,16 @@ class SPIDisplay(QWidget):
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
-        # Set x-axis to show time units based on sample rate
-        self.sample_rate = 1000  # Default sample rate in Hz
         self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
         self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
         self.plot.setYRange(-2, 2 * 8, padding=0)  # 8 channels
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
-
         self.plot.getAxis('left').setTicks([])
         self.plot.getAxis('left').setStyle(showValues=False)
         self.plot.getAxis('left').setPen(None)
-
-        self.plot.setLabel('bottom', 'Time', units='s')  # Label the x-axis as time
+        self.plot.setLabel('bottom', 'Time', units='s')
 
         self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
         self.curves = []
@@ -237,12 +225,10 @@ class SPIDisplay(QWidget):
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel_group(idx, checked))
-            color = self.colors[i % len(self.colors)]
             button_layout.addWidget(button, i, 0)
             self.channel_buttons.append(button)
 
             # Trigger Mode Button
-            # Default to mode of MISO
             trigger_button = QPushButton(self.current_trigger_modes[4 * i])
             trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx))
             button_layout.addWidget(trigger_button, i, 1)
@@ -272,11 +258,9 @@ class SPIDisplay(QWidget):
         self.num_samples_input.setValidator(QIntValidator(1, 1023))
         self.num_samples_input.setText("300")
         button_layout.addWidget(self.num_samples_input, 3, 1)
-
-        # Connect the returnPressed signal to send_num_samples_command
         self.num_samples_input.returnPressed.connect(self.send_num_samples_command)
 
-        # Create a horizontal layout for the Start/Stop and Single buttons
+        # Control buttons layout
         control_buttons_layout = QHBoxLayout()
 
         self.toggle_button = QPushButton("Start")
@@ -287,16 +271,15 @@ class SPIDisplay(QWidget):
         self.single_button.clicked.connect(self.start_single_capture)
         control_buttons_layout.addWidget(self.single_button)
 
-        # Add the control buttons layout to the button_layout
         button_layout.addLayout(control_buttons_layout, 4, 0, 1, 3)
 
+        # Cursor for measurement
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
         self.plot.addItem(self.cursor)
 
         self.cursor_label = pg.TextItem(anchor=(0, 1), color='y')
         self.plot.addItem(self.cursor_label)
         self.update_cursor_position()
-
         self.cursor.sigPositionChanged.connect(self.update_cursor_position)
 
     def handle_sample_rate_input(self):
@@ -305,11 +288,9 @@ class SPIDisplay(QWidget):
             if sample_rate <= 0:
                 raise ValueError("Sample rate must be positive")
             self.sample_rate = sample_rate  # Store sample_rate
-            # Calculate period based on sample rate
             period = (72 * 10**6) / sample_rate
             print(f"Sample Rate set to {sample_rate} Hz, Period: {period} ticks")
             self.updateSampleTimer(int(period))
-            # Update x-axis range
             self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
             self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
         except ValueError as e:
@@ -318,16 +299,8 @@ class SPIDisplay(QWidget):
     def send_num_samples_command(self):
         try:
             num_samples = int(self.num_samples_input.text())
-            msb_value, lsb_value = get_num_samples_command(num_samples)
-            msb_str = str(msb_value)
-            lsb_str = str(lsb_value)
-            if self.worker.serial.is_open:
-                # Send MSB value
-                self.worker.serial.write(msb_str.encode('utf-8'))
-                # Send LSB value
-                self.worker.serial.write(lsb_str.encode('utf-8'))
-            else:
-                print("Serial connection is not open")
+            self.num_samples = num_samples
+            self.updateTriggerTimer()
         except ValueError as e:
             print(f"Invalid number of samples: {e}")
 
@@ -356,40 +329,64 @@ class SPIDisplay(QWidget):
         except serial.SerialException as e:
             print(f"Failed to send trigger pins command: {str(e)}")
 
-    # period is a 32-bit integer
     def updateSampleTimer(self, period):
+        self.period = period
         try:
-            # Send in command for upper half of period
             self.worker.serial.write(b'5')
             time.sleep(0.001)
-            # Send first two hex bits
-            selectedBits = period >> 24
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send first byte
+            selected_bits = (period >> 24) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.001)
-            # Send next two hex bits
-            mask = 0x00FF0000
-            selectedBits = (period & mask) >> 16
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send second byte
+            selected_bits = (period >> 16) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.001)
-            # Send in command for lower half of period
             self.worker.serial.write(b'6')
             time.sleep(0.001)
-            # Send next two hex bits
-            mask = 0x0000FF00
-            selectedBits = (period & mask) >> 8
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send third byte
+            selected_bits = (period >> 8) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.001)
-            # Send last two hex bits
-            mask = 0x000000FF
-            selectedBits = (period & mask)
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send fourth byte
+            selected_bits = period & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.001)
         except Exception as e:
             print(f"Failed to update sample timer: {e}")
+
+    def updateTriggerTimer(self):
+        sampling_freq = 72e6 / self.period
+        trigger_freq = sampling_freq / self.num_samples
+        period16 = 72e6 / trigger_freq
+        prescaler = 1
+        if period16 > 2**16:
+            prescaler = math.ceil(period16 / (2**16))
+            period16 = int((72e6 / prescaler) / trigger_freq)
+        try:
+            self.worker.serial.write(b'4')
+            time.sleep(0.01)
+            # Send high byte
+            selected_bits = (int(period16) >> 8) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
+            time.sleep(0.01)
+            # Send low byte
+            selected_bits = int(period16) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
+            time.sleep(0.01)
+            # Update Prescaler
+            self.worker.serial.write(b'7')
+            time.sleep(0.01)
+            # Send high byte
+            selected_bits = (prescaler >> 8) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
+            time.sleep(0.01)
+            # Send low byte
+            selected_bits = prescaler & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
+            time.sleep(0.01)
+        except Exception as e:
+            print(f"Failed to update trigger timer: {e}")
 
     def toggle_trigger_mode(self, group_idx):
         trigger_channel = self.trigger_channels[group_idx]
@@ -449,14 +446,14 @@ class SPIDisplay(QWidget):
             self.stop_reading()
             self.toggle_button.setText("Run")
             self.single_button.setEnabled(True)
-            self.toggle_button.setStyleSheet("")  # Reset to default style
+            self.toggle_button.setStyleSheet("")
         else:
             self.is_single_capture = False
             self.send_start_message()
             self.start_reading()
             self.toggle_button.setText("Running")
-            self.single_button.setEnabled(True)  # Keep Single button enabled
-            self.toggle_button.setStyleSheet("background-color: #00FF77; color: black;")  # Change to cyan with black text
+            self.single_button.setEnabled(True)
+            self.toggle_button.setStyleSheet("background-color: #00FF77; color: black;")
 
     def send_start_message(self):
         if self.worker.serial.is_open:
@@ -504,7 +501,7 @@ class SPIDisplay(QWidget):
             self.start_reading()
             self.single_button.setEnabled(False)
             self.toggle_button.setEnabled(False)
-            self.single_button.setStyleSheet("background-color: #00FF77; color: black;")  # Change to cyan with black text
+            self.single_button.setStyleSheet("background-color: #00FF77; color: black;")
 
     def stop_single_capture(self):
         self.is_single_capture = False
@@ -513,7 +510,7 @@ class SPIDisplay(QWidget):
         self.single_button.setEnabled(True)
         self.toggle_button.setEnabled(True)
         self.toggle_button.setText("Start")
-        self.single_button.setStyleSheet("")  # Reset to default style
+        self.single_button.setStyleSheet("")
 
     def clear_data_buffers(self):
         self.data_buffer = [[] for _ in range(8)]  # 8 channels
@@ -535,7 +532,7 @@ class SPIDisplay(QWidget):
                 inverted_index = 8 - i - 1
                 num_samples = len(self.data_buffer[i])
                 if num_samples > 1:
-                    t = np.arange(num_samples) / self.sample_rate  # Time in seconds
+                    t = np.arange(num_samples) / self.sample_rate
                     square_wave_time = []
                     square_wave_data = []
                     for j in range(1, num_samples):

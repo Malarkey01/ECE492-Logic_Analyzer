@@ -2,6 +2,10 @@
 
 import sys
 import serial
+import math
+import time
+import numpy as np
+import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -15,16 +19,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
-import pyqtgraph as pg
-import numpy as np
-from aesthetic import get_icon
 from InterfaceCommands import (
     get_trigger_edge_command,
     get_trigger_pins_command,
 )
-
-import time
-import math
+from aesthetic import get_icon
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -82,15 +81,14 @@ class SerialWorker(QThread):
         if self.serial.is_open:
             self.serial.close()
 
+
 class FixedYViewBox(pg.ViewBox):
     def __init__(self, *args, **kwargs):
         super(FixedYViewBox, self).__init__(*args, **kwargs)
 
     def scaleBy(self, s=None, center=None, x=None, y=None):
         y = 1.0
-        if x is not None:
-            pass
-        else:
+        if x is None:
             if s is None:
                 x = 1.0
             elif isinstance(s, dict):
@@ -103,9 +101,7 @@ class FixedYViewBox(pg.ViewBox):
 
     def translateBy(self, t=None, x=None, y=None):
         y = 0.0
-        if x is not None:
-            pass
-        else:
+        if x is None:
             if t is None:
                 x = 0.0
             elif isinstance(t, dict):
@@ -115,6 +111,8 @@ class FixedYViewBox(pg.ViewBox):
             else:
                 x = t
         super(FixedYViewBox, self).translateBy(x=x, y=y)
+
+
 
 class EditableButton(QPushButton):
     def __init__(self, label, parent=None):
@@ -137,6 +135,7 @@ class EditableButton(QPushButton):
         elif action == reset_action:
             self.setText(self.default_label)
 
+
 class SignalDisplay(QWidget):
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
@@ -149,14 +148,9 @@ class SignalDisplay(QWidget):
         self.data_buffer = [[] for _ in range(self.channels)]
         self.channel_visibility = [False] * self.channels
 
-        self.is_single_capture = False  # Initialize single capture flag
-
-        # Initialize trigger modes per channel
+        self.is_single_capture = False
         self.current_trigger_modes = ['No Trigger'] * self.channels
-
-        self.trigger_mode_indices = [0] * self.channels  # Indices in ['No Trigger', 'Rising Edge', 'Falling Edge']
-
-        # Initialize sample_rate
+        self.trigger_mode_indices = [0] * self.channels
         self.sample_rate = 1000  # Default sample rate in Hz
 
         self.setup_ui()
@@ -176,20 +170,16 @@ class SignalDisplay(QWidget):
         main_layout.addWidget(self.graph_layout)
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
-
-        # Set x-axis to show time units based on sample rate
         self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
         self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
-
         self.plot.getAxis('left').setTicks([])
         self.plot.getAxis('left').setStyle(showValues=False)
         self.plot.getAxis('left').setPen(None)
-
-        self.plot.setLabel('bottom', 'Time', units='s')  # Label the x-axis as time
+        self.plot.setLabel('bottom', 'Time', units='s')
 
         self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
         self.curves = []
@@ -212,7 +202,6 @@ class SignalDisplay(QWidget):
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel(idx, checked))
-            color = self.colors[i % len(self.colors)]
             button_layout.addWidget(button, i, 0)
             self.channel_buttons.append(button)
 
@@ -239,13 +228,10 @@ class SignalDisplay(QWidget):
         self.num_samples_input.setValidator(QIntValidator(1, 1023))
         self.num_samples_input.setText("300")
         button_layout.addWidget(self.num_samples_input, self.channels + 1, 1)
-
-        # Connect the returnPressed signal to send_num_samples_command
         self.num_samples_input.returnPressed.connect(self.send_num_samples_command)
 
-        # Create a horizontal layout for the Start/Stop and Single buttons
+        # Control buttons layout
         control_buttons_layout = QHBoxLayout()
-
         self.toggle_button = QPushButton("Start")
         self.toggle_button.clicked.connect(self.toggle_reading)
         control_buttons_layout.addWidget(self.toggle_button)
@@ -253,17 +239,15 @@ class SignalDisplay(QWidget):
         self.single_button = QPushButton("Single")
         self.single_button.clicked.connect(self.start_single_capture)
         control_buttons_layout.addWidget(self.single_button)
-
-        # Add the control buttons layout to the button_layout
         button_layout.addLayout(control_buttons_layout, self.channels + 2, 0, 1, 2)
 
+        # Cursor for measurement
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
         self.plot.addItem(self.cursor)
 
         self.cursor_label = pg.TextItem(anchor=(0, 1), color='y')
         self.plot.addItem(self.cursor_label)
         self.update_cursor_position()
-
         self.cursor.sigPositionChanged.connect(self.update_cursor_position)
 
     def handle_sample_rate_input(self):
@@ -271,12 +255,10 @@ class SignalDisplay(QWidget):
             sample_rate = int(self.sample_rate_input.text())
             if sample_rate <= 0:
                 raise ValueError("Sample rate must be positive")
-            self.sample_rate = sample_rate  # Store sample_rate
-            # Calculate period based on sample rate
+            self.sample_rate = sample_rate
             period = (72 * 10**6) / sample_rate
             print(f"Sample Rate set to {sample_rate} Hz, Period: {period} ticks")
             self.updateSampleTimer(int(period))
-            # Update x-axis range
             self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
             self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
         except ValueError as e:
@@ -287,13 +269,6 @@ class SignalDisplay(QWidget):
             num_samples = int(self.num_samples_input.text())
             self.num_samples = num_samples
             self.updateTriggerTimer()
-            # if self.worker.serial.is_open:
-            #     # Send MSB value
-            #     self.worker.serial.write(msb_str.encode('utf-8'))
-            #     # Send LSB value
-            #     self.worker.serial.write(lsb_str.encode('utf-8'))
-            # else:
-            #     print("Serial connection is not open")
         except ValueError as e:
             print(f"Invalid number of samples: {e}")
 
@@ -322,95 +297,74 @@ class SignalDisplay(QWidget):
         except serial.SerialException as e:
             print(f"Failed to send trigger pins command: {str(e)}")
 
-    # period is a 32-bit integer
     def updateSampleTimer(self, period):
         self.period = period
         try:
-            # Send in command for upper half of period
             self.worker.serial.write(b'5')
             time.sleep(0.001)
-            # Send first two hex bits
-            selectedBits = period >> 24
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send first byte
+            selected_bits = (period >> 24) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.001)
-            # Send next two hex bits
-            mask = 0x00FF0000
-            selectedBits = (period & mask) >> 16
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send second byte
+            selected_bits = (period >> 16) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.001)
-            # Send in command for lower half of period
             self.worker.serial.write(b'6')
             time.sleep(0.001)
-            # Send next two hex bits
-            mask = 0x0000FF00
-            selectedBits = (period & mask) >> 8
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send third byte
+            selected_bits = (period >> 8) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.001)
-            # Send last two hex bits
-            mask = 0x000000FF
-            selectedBits = (period & mask)
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send fourth byte
+            selected_bits = period & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.001)
         except Exception as e:
             print(f"Failed to update sample timer: {e}")
-            
+
     def updateTriggerTimer(self):
-        samplingFreq = 72e6 / self.period
-        trigFreq = samplingFreq / self.num_samples
-        period16 = 72e6 / trigFreq
-        prescalar = 1
-        if(period16 > 2**16):
-            prescalar = math.ceil(period16 /(2**16))
-            period16 = int((72e6 / prescalar) / trigFreq)
+        sampling_freq = 72e6 / self.period
+        trigger_freq = sampling_freq / self.num_samples
+        period16 = 72e6 / trigger_freq
+        prescaler = 1
+        if period16 > 2**16:
+            prescaler = math.ceil(period16 / (2**16))
+            period16 = int((72e6 / prescaler) / trigger_freq)
         try:
-            # Send in command for lower half of period
             self.worker.serial.write(b'4')
             time.sleep(0.01)
-            # Send two hex bits
-            mask = 0xFF00
-            selectedBits = (period16 & mask) >> 8
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send high byte
+            selected_bits = (period16 >> 8) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.01)
-            # Send last two hex bits
-            mask = 0x00FF
-            selectedBits = (period16 & mask)
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send low byte
+            selected_bits = period16 & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.01)
-            #update Prescalar
-            # Send in command for lower half of period
+            # Update Prescaler
             self.worker.serial.write(b'7')
             time.sleep(0.01)
-            # Send two hex bits
-            mask = 0xFF00
-            selectedBits = (prescalar & mask) >> 8
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send high byte
+            selected_bits = (prescaler >> 8) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.01)
-            # Send last two hex bits
-            mask = 0x00FF
-            selectedBits = (prescalar & mask)
-            selectedBits = str(selectedBits).encode('utf-8')
-            self.worker.serial.write(selectedBits)
+            # Send low byte
+            selected_bits = prescaler & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
             time.sleep(0.01)
         except Exception as e:
             print(f"Failed to update trigger timer: {e}")
-        
 
     def toggle_trigger_mode(self, channel_idx):
         self.trigger_mode_indices[channel_idx] = (self.trigger_mode_indices[channel_idx] + 1) % len(self.trigger_mode_options)
         mode = self.trigger_mode_options[self.trigger_mode_indices[channel_idx]]
         self.trigger_mode_buttons[channel_idx].setText(mode)
-        self.current_trigger_modes[channel_idx] = mode  # Update current trigger mode
+        self.current_trigger_modes[channel_idx] = mode
         if self.worker:
             self.worker.set_trigger_mode(channel_idx, mode)
-        self.send_trigger_edge_command()   # Send the updated edge command
-        self.send_trigger_pins_command()   # Send the updated pins command
+        self.send_trigger_edge_command()
+        self.send_trigger_pins_command()
 
     def is_light_color(self, hex_color):
         hex_color = hex_color.lstrip('#')
@@ -437,14 +391,14 @@ class SignalDisplay(QWidget):
             self.stop_reading()
             self.toggle_button.setText("Run")
             self.single_button.setEnabled(True)
-            self.toggle_button.setStyleSheet("")  # Reset to default style
+            self.toggle_button.setStyleSheet("")
         else:
             self.is_single_capture = False
             self.send_start_message()
             self.start_reading()
             self.toggle_button.setText("Running")
-            self.single_button.setEnabled(True)  # Keep Single button enabled
-            self.toggle_button.setStyleSheet("background-color: #00FF77; color: black;")  # Change to cyan with black text
+            self.single_button.setEnabled(True)
+            self.toggle_button.setStyleSheet("background-color: #00FF77; color: black;")
 
     def send_start_message(self):
         if self.worker.serial.is_open:
@@ -492,7 +446,7 @@ class SignalDisplay(QWidget):
             self.start_reading()
             self.single_button.setEnabled(False)
             self.toggle_button.setEnabled(False)
-            self.single_button.setStyleSheet("background-color: #00FF77; color: black;")  # Change to cyan with black text
+            self.single_button.setStyleSheet("background-color: #00FF77; color: black;")
 
     def stop_single_capture(self):
         self.is_single_capture = False
@@ -501,7 +455,7 @@ class SignalDisplay(QWidget):
         self.single_button.setEnabled(True)
         self.toggle_button.setEnabled(True)
         self.toggle_button.setText("Start")
-        self.single_button.setStyleSheet("")  # Reset to default style
+        self.single_button.setStyleSheet("")
 
     def clear_data_buffers(self):
         self.data_buffer = [[] for _ in range(self.channels)]
@@ -523,18 +477,17 @@ class SignalDisplay(QWidget):
                 inverted_index = self.channels - i - 1
                 num_samples = len(self.data_buffer[i])
                 if num_samples > 1:
-                    t = np.arange(num_samples) / self.sample_rate  # Time in seconds
+                    t = np.arange(num_samples) / self.sample_rate
                     square_wave_time = []
                     square_wave_data = []
                     for j in range(1, num_samples):
                         square_wave_time.extend([t[j-1], t[j]])
-                        square_wave_data.extend([
-                            self.data_buffer[i][j-1] + inverted_index * 2,
-                            self.data_buffer[i][j-1] + inverted_index * 2,
-                        ])
+                        level = self.data_buffer[i][j-1] + inverted_index * 2
+                        square_wave_data.extend([level, level])
                         if self.data_buffer[i][j] != self.data_buffer[i][j-1]:
                             square_wave_time.append(t[j])
-                            square_wave_data.append(self.data_buffer[i][j] + inverted_index * 2)
+                            level = self.data_buffer[i][j] + inverted_index * 2
+                            square_wave_data.append(level)
                     self.curves[i].setData(square_wave_time, square_wave_data)
 
     def update_cursor_position(self):

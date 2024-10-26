@@ -16,6 +16,7 @@ def get_trigger_edge_command(trigger_modes):
             command_value |= 1 << idx  # Set bit idx if Rising Edge
     return command_value
 
+
 def get_trigger_pins_command(trigger_modes):
     """
     Determines which channels have triggers enabled and returns the corresponding command integer.
@@ -31,19 +32,3 @@ def get_trigger_pins_command(trigger_modes):
         if mode in ('Rising Edge', 'Falling Edge'):
             command_value |= 1 << idx  # Set bit idx if trigger is enabled
     return command_value
-
-def get_num_samples_command(num_samples):
-    """
-    Splits the number of samples (1-1023) into two parts:
-    - First part: bits 9-8 (MSBs), representing values 0-3
-    - Second part: bits 7-0 (LSBs), representing values 0-255
-    Returns a tuple (msb_value, lsb_value) where:
-    - msb_value is an integer between 0 and 3
-    - lsb_value is an integer between 0 and 255
-    """
-    if not (1 <= num_samples <= 1023):
-        raise ValueError("Number of samples must be between 1 and 1023")
-
-    msb_value = (num_samples >> 8) & 0b11  # Extract bits 9-8
-    lsb_value = num_samples & 0xFF         # Extract bits 7-0
-    return msb_value, lsb_value
