@@ -17,6 +17,9 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QComboBox,
+    QDialog,
+    QRadioButton,
+    QButtonGroup,
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
@@ -107,34 +110,33 @@ class SerialWorker(QThread):
 
 class FixedYViewBox(pg.ViewBox):
     def __init__(self, *args, **kwargs):
-        super(FixedYViewBox, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def scaleBy(self, s=None, center=None, x=None, y=None):
-        y = 1.0
+        y = 1.0  # Fix y-scaling
         if x is None:
             if s is None:
                 x = 1.0
             elif isinstance(s, dict):
                 x = s.get('x', 1.0)
             elif isinstance(s, (list, tuple)):
-                x = s[0]
+                x = s[0] if len(s) > 0 else 1.0
             else:
                 x = s
-        super(FixedYViewBox, self).scaleBy(x=x, y=y, center=center)
+        super().scaleBy(x=x, y=y, center=center)
 
     def translateBy(self, t=None, x=None, y=None):
-        y = 0.0
+        y = 0.0  # Fix y-translation
         if x is None:
             if t is None:
                 x = 0.0
             elif isinstance(t, dict):
                 x = t.get('x', 0.0)
             elif isinstance(t, (list, tuple)):
-                x = t[0]
+                x = t[0] if len(t) > 0 else 0.0
             else:
                 x = t
-        super(FixedYViewBox, self).translateBy(x=x, y=y)
-
+        super().translateBy(x=x, y=y)
 
 
 class EditableButton(QPushButton):
@@ -159,6 +161,111 @@ class EditableButton(QPushButton):
             self.setText(self.default_label)
 
 
+class I2CChannelButton(EditableButton):
+    configure_requested = pyqtSignal(int)  # Signal to notify when configure is requested
+
+    def __init__(self, label, group_idx, parent=None):
+        super().__init__(label, parent)
+        self.group_idx = group_idx  # Store the index of the I2C group
+
+    def show_context_menu(self, position):
+        menu = QMenu()
+        rename_action = menu.addAction("Rename")
+        reset_action = menu.addAction("Reset to Default")
+        configure_action = menu.addAction("Configure")  # Add the Configure option
+        action = menu.exec(self.mapToGlobal(position))
+        if action == rename_action:
+            new_label, ok = QInputDialog.getText(
+                self, "Rename Button", "Enter new label:", text=self.text()
+            )
+            if ok and new_label:
+                self.setText(new_label)
+        elif action == reset_action:
+            self.setText(self.default_label)
+        elif action == configure_action:
+            self.configure_requested.emit(self.group_idx)  # Emit signal to open configuration dialog
+
+
+class I2CConfigDialog(QDialog):
+    def __init__(self, current_config, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("I2C Configuration")
+        self.current_config = current_config  # Dictionary to hold current configurations
+
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        # Clock Channel Selection
+        clock_layout = QHBoxLayout()
+        clock_label = QLabel("Clock Channel:")
+        self.clock_combo = QComboBox()
+        self.clock_combo.addItems([f"Channel {i+1}" for i in range(8)])
+        self.clock_combo.setCurrentIndex(self.current_config.get('clock_channel', 2) - 1)
+        clock_layout.addWidget(clock_label)
+        clock_layout.addWidget(self.clock_combo)
+        layout.addLayout(clock_layout)
+
+        # Data Channel Selection
+        data_layout = QHBoxLayout()
+        data_label = QLabel("Data Channel:")
+        self.data_combo = QComboBox()
+        self.data_combo.addItems([f"Channel {i+1}" for i in range(8)])
+        self.data_combo.setCurrentIndex(self.current_config.get('data_channel', 1) - 1)
+        data_layout.addWidget(data_label)
+        data_layout.addWidget(self.data_combo)
+        layout.addLayout(data_layout)
+
+        # Address Width Selection
+        address_layout = QHBoxLayout()
+        address_label = QLabel("Address Width:")
+        self.address_group = QButtonGroup(self)
+        self.address_7bit = QRadioButton("7 bits")
+        self.address_8bit = QRadioButton("8 bits")
+        self.address_group.addButton(self.address_7bit)
+        self.address_group.addButton(self.address_8bit)
+        address_layout.addWidget(address_label)
+        address_layout.addWidget(self.address_7bit)
+        address_layout.addWidget(self.address_8bit)
+        layout.addLayout(address_layout)
+
+        if self.current_config.get('address_width', 8) == 7:
+            self.address_7bit.setChecked(True)
+        else:
+            self.address_8bit.setChecked(True)
+
+        # Data Format Selection
+        format_layout = QHBoxLayout()
+        format_label = QLabel("Data Format:")
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["Binary", "Decimal", "Hexadecimal", "BCD", "ASCII"])
+        self.format_combo.setCurrentText(self.current_config.get('data_format', 'Hexadecimal'))
+        format_layout.addWidget(format_label)
+        format_layout.addWidget(self.format_combo)
+        layout.addLayout(format_layout)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        ok_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def get_configuration(self):
+        return {
+            'clock_channel': self.clock_combo.currentIndex() + 1,
+            'data_channel': self.data_combo.currentIndex() + 1,
+            'address_width': 7 if self.address_7bit.isChecked() else 8,
+            'data_format': self.format_combo.currentText(),
+        }
+
+
 class I2CDisplay(QWidget):
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
@@ -179,6 +286,8 @@ class I2CDisplay(QWidget):
         self.trigger_channel_options = ['SDA', 'SCL']
 
         self.sample_rate = 1000  # Default sample rate in Hz
+
+        self.group_configs = [{} for _ in range(4)]  # Store configurations for each group
 
         self.setup_ui()
         self.timer = QTimer()
@@ -228,10 +337,11 @@ class I2CDisplay(QWidget):
             sda_channel = 2 * i + 1
             scl_channel = 2 * i + 2
             label = f"I2C {i+1}\nCh{sda_channel}:SDA\nCh{scl_channel}:SCL"
-            button = EditableButton(label)
+            button = I2CChannelButton(label, group_idx=i)
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel_group(idx, checked))
+            button.configure_requested.connect(self.open_configuration_dialog)
             button_layout.addWidget(button, i, 0)
             self.channel_buttons.append(button)
 
@@ -530,6 +640,7 @@ class I2CDisplay(QWidget):
     def handle_data(self, data_list):
         if self.is_reading:
             for data_value in data_list:
+                # Store raw data for plotting
                 for i in range(8):
                     bit = (data_value >> i) & 1
                     self.data_buffer[i].append(bit)
@@ -548,10 +659,10 @@ class I2CDisplay(QWidget):
                     square_wave_time = []
                     square_wave_data = []
                     for j in range(1, num_samples):
-                        square_wave_time.extend([t[j-1], t[j]])
-                        level = self.data_buffer[i][j-1] + inverted_index * 2
+                        square_wave_time.extend([t[j - 1], t[j]])
+                        level = self.data_buffer[i][j - 1] + inverted_index * 2
                         square_wave_data.extend([level, level])
-                        if self.data_buffer[i][j] != self.data_buffer[i][j-1]:
+                        if self.data_buffer[i][j] != self.data_buffer[i][j - 1]:
                             square_wave_time.append(t[j])
                             level = self.data_buffer[i][j] + inverted_index * 2
                             square_wave_data.append(level)
@@ -567,3 +678,18 @@ class I2CDisplay(QWidget):
         self.worker.quit()
         self.worker.wait()
         event.accept()
+
+    def open_configuration_dialog(self, group_idx):
+        current_config = self.group_configs[group_idx]
+        dialog = I2CConfigDialog(current_config, parent=self)
+        if dialog.exec():
+            new_config = dialog.get_configuration()
+            self.group_configs[group_idx] = new_config
+            print(f"Configuration for group {group_idx+1} updated: {new_config}")
+            # Update labels on the button to reflect new channel assignments
+            sda_channel = new_config['data_channel']
+            scl_channel = new_config['clock_channel']
+            label = f"I2C {group_idx+1}\nCh{sda_channel}:SDA\nCh{scl_channel}:SCL"
+            self.channel_buttons[group_idx].setText(label)
+            # Clear data buffers
+            self.clear_data_buffers()
