@@ -17,6 +17,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QComboBox,
+    QDialog,
+    QSpinBox,
+    QRadioButton,
+    QButtonGroup,
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
@@ -34,8 +38,8 @@ class SerialWorker(QThread):
         super().__init__()
         self.is_running = True
         self.channels = channels
-        self.trigger_modes = ['No Trigger'] * 8  # Trigger modes per channel
-        self.trigger_channels = ['MISO'] * 2  # Default trigger channel for each group
+        self.trigger_modes = ['No Trigger'] * channels
+        self.trigger_channels = ['Clock'] * 2  # Default to Clock for each SPI group
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
@@ -67,16 +71,28 @@ class SerialWorker(QThread):
                             if not triggered[i]:
                                 last_value = data_buffer[-2] if len(data_buffer) >= 2 else None
                                 if last_value is not None:
-                                    # Extract bits for MISO, MOSI, SS, and SCLK
-                                    current_bits = (data_value >> (4 * i)) & 0b1111
-                                    last_bits = (last_value >> (4 * i)) & 0b1111
+                                    # Extract bits for SS, Data, and Clock
+                                    current_ss = (data_value >> (3 * i)) & 1
+                                    current_data = (data_value >> (3 * i + 1)) & 1
+                                    current_clk = (data_value >> (3 * i + 2)) & 1
+                                    last_ss = (last_value >> (3 * i)) & 1
+                                    last_data = (last_value >> (3 * i + 1)) & 1
+                                    last_clk = (last_value >> (3 * i + 2)) & 1
 
                                     # Determine which channel to use for trigger
                                     trigger_channel = self.trigger_channels[i]
-                                    bit_idx = self.trigger_channel_options.index(trigger_channel)
-                                    current_line = (current_bits >> bit_idx) & 1
-                                    last_line = (last_bits >> bit_idx) & 1
-                                    channel_idx = 4 * i + bit_idx
+                                    if trigger_channel == 'SS':
+                                        current_line = current_ss
+                                        last_line = last_ss
+                                        channel_idx = 3 * i
+                                    elif trigger_channel == 'Data':
+                                        current_line = current_data
+                                        last_line = last_data
+                                        channel_idx = 3 * i + 1
+                                    else:
+                                        current_line = current_clk
+                                        last_line = last_clk
+                                        channel_idx = 3 * i + 2
 
                                     mode = self.trigger_modes[channel_idx]
                                     if mode != 'No Trigger':
@@ -101,34 +117,33 @@ class SerialWorker(QThread):
 
 class FixedYViewBox(pg.ViewBox):
     def __init__(self, *args, **kwargs):
-        super(FixedYViewBox, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def scaleBy(self, s=None, center=None, x=None, y=None):
-        y = 1.0
+        y = 1.0  # Fix y-scaling
         if x is None:
             if s is None:
                 x = 1.0
             elif isinstance(s, dict):
                 x = s.get('x', 1.0)
             elif isinstance(s, (list, tuple)):
-                x = s[0]
+                x = s[0] if len(s) > 0 else 1.0
             else:
                 x = s
-        super(FixedYViewBox, self).scaleBy(x=x, y=y, center=center)
+        super().scaleBy(x=x, y=y, center=center)
 
     def translateBy(self, t=None, x=None, y=None):
-        y = 0.0
+        y = 0.0  # Fix y-translation
         if x is None:
             if t is None:
                 x = 0.0
             elif isinstance(t, dict):
                 x = t.get('x', 0.0)
             elif isinstance(t, (list, tuple)):
-                x = t[0]
+                x = t[0] if len(t) > 0 else 0.0
             else:
                 x = t
-        super(FixedYViewBox, self).translateBy(x=x, y=y)
-
+        super().translateBy(x=x, y=y)
 
 
 class EditableButton(QPushButton):
@@ -153,6 +168,133 @@ class EditableButton(QPushButton):
             self.setText(self.default_label)
 
 
+class SPIChannelButton(EditableButton):
+    configure_requested = pyqtSignal(int)  # Signal to notify when configure is requested
+
+    def __init__(self, label, group_idx, parent=None):
+        super().__init__(label, parent)
+        self.group_idx = group_idx  # Store the index of the SPI group
+
+    def show_context_menu(self, position):
+        menu = QMenu()
+        rename_action = menu.addAction("Rename")
+        reset_action = menu.addAction("Reset to Default")
+        configure_action = menu.addAction("Configure")  # Add the Configure option
+        action = menu.exec(self.mapToGlobal(position))
+        if action == rename_action:
+            new_label, ok = QInputDialog.getText(
+                self, "Rename Button", "Enter new label:", text=self.text()
+            )
+            if ok and new_label:
+                self.setText(new_label)
+        elif action == reset_action:
+            self.setText(self.default_label)
+        elif action == configure_action:
+            self.configure_requested.emit(self.group_idx)  # Emit signal to open configuration dialog
+
+
+class SPIConfigDialog(QDialog):
+    def __init__(self, current_config, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("SPI Configuration")
+        self.current_config = current_config  # Dictionary to hold current configurations
+
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        # Slave Select Channel Selection
+        ss_layout = QHBoxLayout()
+        ss_label = QLabel("Slave Select (SS) Channel:")
+        self.ss_combo = QComboBox()
+        self.ss_combo.addItems([f"Channel {i+1}" for i in range(8)])
+        self.ss_combo.setCurrentIndex(self.current_config.get('ss_channel', 0))
+        ss_layout.addWidget(ss_label)
+        ss_layout.addWidget(self.ss_combo)
+        layout.addLayout(ss_layout)
+
+        # Data Channel Selection
+        data_layout = QHBoxLayout()
+        data_label = QLabel("Data Channel:")
+        self.data_combo = QComboBox()
+        self.data_combo.addItems([f"Channel {i+1}" for i in range(8)])
+        self.data_combo.setCurrentIndex(self.current_config.get('data_channel', 1))
+        data_layout.addWidget(data_label)
+        data_layout.addWidget(self.data_combo)
+        layout.addLayout(data_layout)
+
+        # Clock Channel Selection
+        clock_layout = QHBoxLayout()
+        clock_label = QLabel("Clock Channel:")
+        self.clock_combo = QComboBox()
+        self.clock_combo.addItems([f"Channel {i+1}" for i in range(8)])
+        self.clock_combo.setCurrentIndex(self.current_config.get('clock_channel', 2))
+        clock_layout.addWidget(clock_label)
+        clock_layout.addWidget(self.clock_combo)
+        layout.addLayout(clock_layout)
+
+        # Number of Bits Selection
+        bits_layout = QHBoxLayout()
+        bits_label = QLabel("Number of Bits:")
+        self.bits_spinbox = QSpinBox()
+        self.bits_spinbox.setRange(1, 32)
+        self.bits_spinbox.setValue(self.current_config.get('num_bits', 8))
+        bits_layout.addWidget(bits_label)
+        bits_layout.addWidget(self.bits_spinbox)
+        layout.addLayout(bits_layout)
+
+        # Bit Order Selection
+        bit_order_layout = QHBoxLayout()
+        bit_order_label = QLabel("Bit Order:")
+        self.bit_order_group = QButtonGroup(self)
+        self.msb_first_radio = QRadioButton("MSB First")
+        self.lsb_first_radio = QRadioButton("LSB First")
+        self.bit_order_group.addButton(self.msb_first_radio)
+        self.bit_order_group.addButton(self.lsb_first_radio)
+        if self.current_config.get('bit_order', 'MSB') == 'MSB':
+            self.msb_first_radio.setChecked(True)
+        else:
+            self.lsb_first_radio.setChecked(True)
+        bit_order_layout.addWidget(bit_order_label)
+        bit_order_layout.addWidget(self.msb_first_radio)
+        bit_order_layout.addWidget(self.lsb_first_radio)
+        layout.addLayout(bit_order_layout)
+
+        # Data Format Selection
+        format_layout = QHBoxLayout()
+        format_label = QLabel("Data Format:")
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["Binary", "Decimal", "Hexadecimal", "ASCII"])
+        self.format_combo.setCurrentText(self.current_config.get('data_format', 'Hexadecimal'))
+        format_layout.addWidget(format_label)
+        format_layout.addWidget(self.format_combo)
+        layout.addLayout(format_layout)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        ok_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def get_configuration(self):
+        bit_order = 'MSB' if self.msb_first_radio.isChecked() else 'LSB'
+        return {
+            'ss_channel': self.ss_combo.currentIndex(),
+            'data_channel': self.data_combo.currentIndex(),
+            'clock_channel': self.clock_combo.currentIndex(),
+            'num_bits': self.bits_spinbox.value(),
+            'bit_order': bit_order,
+            'data_format': self.format_combo.currentText(),
+        }
+
+
 class SPIDisplay(QWidget):
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
@@ -168,11 +310,13 @@ class SPIDisplay(QWidget):
         self.is_single_capture = False
 
         self.current_trigger_modes = ['No Trigger'] * 8
-        self.trigger_channels = ['MISO'] * 2
+        self.trigger_channels = ['Clock'] * 2
         self.trigger_mode_options = ['No Trigger', 'Rising Edge', 'Falling Edge']
-        self.trigger_channel_options = ['MISO', 'MOSI', 'SS', 'SCLK']
+        self.trigger_channel_options = ['SS', 'Data', 'Clock']
 
         self.sample_rate = 1000  # Default sample rate in Hz
+
+        self.group_configs = [{} for _ in range(2)]  # Store configurations for each group
 
         self.setup_ui()
         self.timer = QTimer()
@@ -219,23 +363,26 @@ class SPIDisplay(QWidget):
         self.trigger_channel_buttons = []
 
         for i in range(2):
-            ch_base = 4 * i + 1
-            label = f"SPI {i+1}\nCh{ch_base}:MISO\nCh{ch_base+1}:MOSI\nCh{ch_base+2}:SS\nCh{ch_base+3}:SCLK"
-            button = EditableButton(label)
+            ss_channel = 3 * i + 1
+            data_channel = 3 * i + 2
+            clock_channel = 3 * i + 3
+            label = f"SPI {i+1}\nCh{ss_channel}:SS\nCh{data_channel}:Data\nCh{clock_channel}:Clk"
+            button = SPIChannelButton(label, group_idx=i)
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel_group(idx, checked))
+            button.configure_requested.connect(self.open_configuration_dialog)
             button_layout.addWidget(button, i, 0)
             self.channel_buttons.append(button)
 
             # Trigger Mode Button
-            trigger_button = QPushButton(self.current_trigger_modes[4 * i])
+            trigger_button = QPushButton(self.current_trigger_modes[3 * i + 2])  # Default to mode of Clock
             trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx))
             button_layout.addWidget(trigger_button, i, 1)
             self.trigger_mode_buttons.append(trigger_button)
 
             # Trigger Channel Button
-            trigger_channel_button = QPushButton(self.trigger_channels[i])  # Default to 'MISO'
+            trigger_channel_button = QPushButton(self.trigger_channels[i])  # Default to 'Clock'
             trigger_channel_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_channel(idx))
             button_layout.addWidget(trigger_channel_button, i, 2)
             self.trigger_channel_buttons.append(trigger_channel_button)
@@ -390,7 +537,12 @@ class SPIDisplay(QWidget):
 
     def toggle_trigger_mode(self, group_idx):
         trigger_channel = self.trigger_channels[group_idx]
-        channel_idx = 4 * group_idx + self.trigger_channel_options.index(trigger_channel)
+        if trigger_channel == 'SS':
+            channel_idx = 3 * group_idx
+        elif trigger_channel == 'Data':
+            channel_idx = 3 * group_idx + 1
+        else:
+            channel_idx = 3 * group_idx + 2
 
         # Cycle through trigger modes
         current_mode_idx = self.trigger_mode_options.index(self.current_trigger_modes[channel_idx])
@@ -412,7 +564,12 @@ class SPIDisplay(QWidget):
         self.trigger_channel_buttons[group_idx].setText(new_channel)
         self.worker.set_trigger_channel(group_idx, new_channel)
         # Update the trigger mode button text to reflect the trigger mode for the new channel
-        channel_idx = 4 * group_idx + new_idx
+        if new_channel == 'SS':
+            channel_idx = 3 * group_idx
+        elif new_channel == 'Data':
+            channel_idx = 3 * group_idx + 1
+        else:
+            channel_idx = 3 * group_idx + 2
         current_mode = self.current_trigger_modes[channel_idx]
         self.trigger_mode_buttons[group_idx].setText(current_mode)
         print(f"Trigger channel for group {group_idx+1} set to {new_channel}")
@@ -424,11 +581,15 @@ class SPIDisplay(QWidget):
         return luminance > 0.5
 
     def toggle_channel_group(self, group_idx, is_checked):
-        base_idx = 4 * group_idx
-        for i in range(4):
-            channel_idx = base_idx + i
-            self.channel_visibility[channel_idx] = is_checked
-            self.curves[channel_idx].setVisible(is_checked)
+        ss_idx = 3 * group_idx
+        data_idx = 3 * group_idx + 1
+        clk_idx = 3 * group_idx + 2
+        self.channel_visibility[ss_idx] = is_checked
+        self.channel_visibility[data_idx] = is_checked
+        self.channel_visibility[clk_idx] = is_checked
+        self.curves[ss_idx].setVisible(is_checked)
+        self.curves[data_idx].setVisible(is_checked)
+        self.curves[clk_idx].setVisible(is_checked)
 
         button = self.channel_buttons[group_idx]
         if is_checked:
@@ -518,6 +679,7 @@ class SPIDisplay(QWidget):
     def handle_data(self, data_list):
         if self.is_reading:
             for data_value in data_list:
+                # Store raw data for plotting
                 for i in range(8):
                     bit = (data_value >> i) & 1
                     self.data_buffer[i].append(bit)
@@ -536,10 +698,10 @@ class SPIDisplay(QWidget):
                     square_wave_time = []
                     square_wave_data = []
                     for j in range(1, num_samples):
-                        square_wave_time.extend([t[j-1], t[j]])
-                        level = self.data_buffer[i][j-1] + inverted_index * 2
+                        square_wave_time.extend([t[j - 1], t[j]])
+                        level = self.data_buffer[i][j - 1] + inverted_index * 2
                         square_wave_data.extend([level, level])
-                        if self.data_buffer[i][j] != self.data_buffer[i][j-1]:
+                        if self.data_buffer[i][j] != self.data_buffer[i][j - 1]:
                             square_wave_time.append(t[j])
                             level = self.data_buffer[i][j] + inverted_index * 2
                             square_wave_data.append(level)
@@ -555,3 +717,19 @@ class SPIDisplay(QWidget):
         self.worker.quit()
         self.worker.wait()
         event.accept()
+
+    def open_configuration_dialog(self, group_idx):
+        current_config = self.group_configs[group_idx]
+        dialog = SPIConfigDialog(current_config, parent=self)
+        if dialog.exec():
+            new_config = dialog.get_configuration()
+            self.group_configs[group_idx] = new_config
+            print(f"Configuration for group {group_idx+1} updated: {new_config}")
+            # Update labels on the button to reflect new channel assignments
+            ss_channel = new_config['ss_channel'] + 1
+            data_channel = new_config['data_channel'] + 1
+            clock_channel = new_config['clock_channel'] + 1
+            label = f"SPI {group_idx+1}\nCh{ss_channel}:SS\nCh{data_channel}:Data\nCh{clock_channel}:Clk"
+            self.channel_buttons[group_idx].setText(label)
+            # Clear data buffers
+            self.clear_data_buffers()
