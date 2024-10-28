@@ -148,6 +148,8 @@ int main(void)
 
   	  	  		 if(val == 1024){
   	  	  			 val = 0;
+  	  	  		 }
+  	  	  		 if (val == bufferPointer) {
   	  	  			sprintf(msg, "%hu\r\n", trigPointer);
   	  	  		  	CDC_Transmit_FS((uint8_t *)msg, strlen(msg));
   	  	  			HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
@@ -359,6 +361,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	if(htim == &htim16){
 		HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
 		state = postTrigger;
+		val = bufferPointer;
 		HAL_TIM_PWM_Stop_IT(&htim2, TIM_CHANNEL_1);
 		HAL_TIM_Base_Stop_IT(&htim16);
 	}
