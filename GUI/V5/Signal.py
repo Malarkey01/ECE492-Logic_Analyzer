@@ -139,7 +139,7 @@ class EditableButton(QPushButton):
 class SignalDisplay(QWidget):
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
-        self.period = 0
+        self.period = 65454
         self.num_samples = 0
         self.port = port
         self.baudrate = baudrate
@@ -331,6 +331,7 @@ class SignalDisplay(QWidget):
         if period16 > 2**16:
             prescaler = math.ceil(period16 / (2**16))
             period16 = int((72e6 / prescaler) / trigger_freq)
+            print(f"Period timer 16 set to {period16}, Timer 16 prescalar is {prescaler}")
         try:
             self.worker.serial.write(b'4')
             time.sleep(0.01)
