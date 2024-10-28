@@ -1,3 +1,5 @@
+# connection.py:
+
 import sys
 import serial.tools.list_ports
 from PyQt6.QtWidgets import QMainWindow, QPushButton, QVBoxLayout, QWidget, QComboBox

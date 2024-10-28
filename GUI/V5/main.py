@@ -1,4 +1,4 @@
-# main.py
+# main.py:
 
 import sys
 import serial.tools.list_ports

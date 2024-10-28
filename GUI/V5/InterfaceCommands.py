@@ -1,4 +1,4 @@
-# InterfaceCommands.py
+# InterfaceCommands.py:
 
 def get_trigger_edge_command(trigger_modes):
     """

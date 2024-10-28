@@ -1,4 +1,4 @@
-# Signal.py
+# Signal.py:
 
 import sys
 import serial

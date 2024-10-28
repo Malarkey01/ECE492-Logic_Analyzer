@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QRadioButton,
     QButtonGroup,
+    QSizePolicy,
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
@@ -38,8 +39,7 @@ class SerialWorker(QThread):
         super().__init__()
         self.is_running = True
         self.channels = channels
-        self.trigger_modes = ['No Trigger'] * channels
-        self.trigger_channels = ['Clock'] * 2  # Default to Clock for each SPI group
+        self.trigger_modes = ['No Trigger'] * channels  # One per channel
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
@@ -49,13 +49,10 @@ class SerialWorker(QThread):
     def set_trigger_mode(self, channel_idx, mode):
         self.trigger_modes[channel_idx] = mode
 
-    def set_trigger_channel(self, group_idx, channel_name):
-        self.trigger_channels[group_idx] = channel_name
-
     def run(self):
         pre_trigger_buffer_size = 1000
         data_buffer = []
-        triggered = [False] * 2  # 2 groups for SPI
+        triggered = [False] * self.channels  # One per channel
 
         while self.is_running:
             if self.serial.in_waiting:
@@ -67,41 +64,21 @@ class SerialWorker(QThread):
                         if len(data_buffer) > pre_trigger_buffer_size:
                             data_buffer.pop(0)
 
-                        for i in range(2):
+                        for i in range(self.channels):
                             if not triggered[i]:
                                 last_value = data_buffer[-2] if len(data_buffer) >= 2 else None
                                 if last_value is not None:
-                                    # Extract bits for SS, Data, and Clock
-                                    current_ss = (data_value >> (3 * i)) & 1
-                                    current_data = (data_value >> (3 * i + 1)) & 1
-                                    current_clk = (data_value >> (3 * i + 2)) & 1
-                                    last_ss = (last_value >> (3 * i)) & 1
-                                    last_data = (last_value >> (3 * i + 1)) & 1
-                                    last_clk = (last_value >> (3 * i + 2)) & 1
+                                    current_line = (data_value >> i) & 1
+                                    last_line = (last_value >> i) & 1
 
-                                    # Determine which channel to use for trigger
-                                    trigger_channel = self.trigger_channels[i]
-                                    if trigger_channel == 'SS':
-                                        current_line = current_ss
-                                        last_line = last_ss
-                                        channel_idx = 3 * i
-                                    elif trigger_channel == 'Data':
-                                        current_line = current_data
-                                        last_line = last_data
-                                        channel_idx = 3 * i + 1
-                                    else:
-                                        current_line = current_clk
-                                        last_line = last_clk
-                                        channel_idx = 3 * i + 2
-
-                                    mode = self.trigger_modes[channel_idx]
+                                    mode = self.trigger_modes[i]
                                     if mode != 'No Trigger':
                                         if mode == 'Rising Edge' and last_line == 0 and current_line == 1:
                                             triggered[i] = True
-                                            print(f"Trigger condition met on SPI group {i+1}: Rising Edge on {trigger_channel}")
+                                            print(f"Trigger condition met on channel {i+1}: Rising Edge")
                                         elif mode == 'Falling Edge' and last_line == 1 and current_line == 0:
                                             triggered[i] = True
-                                            print(f"Trigger condition met on SPI group {i+1}: Falling Edge on {trigger_channel}")
+                                            print(f"Trigger condition met on channel {i+1}: Falling Edge")
 
                         if any(triggered) or all(mode == 'No Trigger' for mode in self.trigger_modes):
                             self.data_ready.emit([data_value])
@@ -304,19 +281,27 @@ class SPIDisplay(QWidget):
         self.baudrate = baudrate
         self.channels = channels
 
-        self.data_buffer = [[] for _ in range(8)]  # 8 channels
-        self.channel_visibility = [False] * 8  # Visibility for each channel
+        self.data_buffer = [[] for _ in range(self.channels)]  # 8 channels
+        self.channel_visibility = [False] * self.channels  # Visibility for each channel
 
         self.is_single_capture = False
 
-        self.current_trigger_modes = ['No Trigger'] * 8
-        self.trigger_channels = ['Clock'] * 2
+        self.current_trigger_modes = ['No Trigger'] * self.channels
         self.trigger_mode_options = ['No Trigger', 'Rising Edge', 'Falling Edge']
-        self.trigger_channel_options = ['SS', 'Data', 'Clock']
 
         self.sample_rate = 1000  # Default sample rate in Hz
 
-        self.group_configs = [{} for _ in range(2)]  # Store configurations for each group
+        # Initialize group configurations with default values
+        self.group_configs = []
+        for i in range(2):  # Adjust based on number of SPI groups
+            self.group_configs.append({
+                'ss_channel': i * 3,
+                'data_channel': i * 3 + 1,
+                'clock_channel': i * 3 + 2,
+                'num_bits': 8,
+                'bit_order': 'MSB',
+                'data_format': 'Hexadecimal',
+            })
 
         self.setup_ui()
         self.timer = QTimer()
@@ -338,7 +323,7 @@ class SPIDisplay(QWidget):
 
         self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
         self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
-        self.plot.setYRange(-2, 2 * 8, padding=0)  # 8 channels
+        self.plot.setYRange(-2, 2 * self.channels, padding=0)  # 8 channels
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
@@ -349,7 +334,7 @@ class SPIDisplay(QWidget):
 
         self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
         self.curves = []
-        for i in range(8):  # 8 channels
+        for i in range(self.channels):  # 8 channels
             color = self.colors[i % len(self.colors)]
             curve = self.plot.plot(pen=pg.mkPen(color=color, width=2))
             curve.setVisible(self.channel_visibility[i])
@@ -359,52 +344,79 @@ class SPIDisplay(QWidget):
         main_layout.addLayout(button_layout)
 
         self.channel_buttons = []
-        self.trigger_mode_buttons = []
-        self.trigger_channel_buttons = []
+        self.ss_trigger_mode_buttons = []
+        self.data_trigger_mode_buttons = []
+        self.clock_trigger_mode_buttons = []
 
-        for i in range(2):
-            ss_channel = 3 * i + 1
-            data_channel = 3 * i + 2
-            clock_channel = 3 * i + 3
-            label = f"SPI {i+1}\nCh{ss_channel}:SS\nCh{data_channel}:Data\nCh{clock_channel}:Clk"
+        for i in range(len(self.group_configs)):
+            row = i * 3  # Increment by 3 for each group
+
+            group_config = self.group_configs[i]
+            ss_channel = group_config['ss_channel']
+            data_channel = group_config['data_channel']
+            clock_channel = group_config['clock_channel']
+
+            label = f"SPI {i+1}\nCh{ss_channel+1}:SS\nCh{data_channel+1}:Data\nCh{clock_channel+1}:Clk"
             button = SPIChannelButton(label, group_idx=i)
+
+            # Set size policy to expand vertically
+            button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel_group(idx, checked))
             button.configure_requested.connect(self.open_configuration_dialog)
-            button_layout.addWidget(button, i, 0)
+            button_layout.addWidget(button, row, 0, 3, 1)  # Span 3 rows, 1 column
+
+            # SS Trigger Mode Button
+            ss_trigger_button = QPushButton(f"SS - {self.current_trigger_modes[ss_channel]}")
+            ss_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            ss_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'SS'))
+            button_layout.addWidget(ss_trigger_button, row, 1)
+            self.ss_trigger_mode_buttons.append(ss_trigger_button)
+
+            # Data Trigger Mode Button
+            data_trigger_button = QPushButton(f"Data - {self.current_trigger_modes[data_channel]}")
+            data_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            data_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'Data'))
+            button_layout.addWidget(data_trigger_button, row + 1, 1)
+            self.data_trigger_mode_buttons.append(data_trigger_button)
+
+            # Clock Trigger Mode Button
+            clock_trigger_button = QPushButton(f"Clk - {self.current_trigger_modes[clock_channel]}")
+            clock_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            clock_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'Clk'))
+            button_layout.addWidget(clock_trigger_button, row + 2, 1)
+            self.clock_trigger_mode_buttons.append(clock_trigger_button)
+
+            # Set row stretches to distribute space equally
+            button_layout.setRowStretch(row, 1)
+            button_layout.setRowStretch(row + 1, 1)
+            button_layout.setRowStretch(row + 2, 1)
+
             self.channel_buttons.append(button)
 
-            # Trigger Mode Button
-            trigger_button = QPushButton(self.current_trigger_modes[3 * i + 2])  # Default to mode of Clock
-            trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx))
-            button_layout.addWidget(trigger_button, i, 1)
-            self.trigger_mode_buttons.append(trigger_button)
-
-            # Trigger Channel Button
-            trigger_channel_button = QPushButton(self.trigger_channels[i])  # Default to 'Clock'
-            trigger_channel_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_channel(idx))
-            button_layout.addWidget(trigger_channel_button, i, 2)
-            self.trigger_channel_buttons.append(trigger_channel_button)
+        # Calculate the starting row for the next set of widgets
+        next_row = len(self.group_configs) * 3  # Number of groups * 3 rows per group
 
         # Sample Rate input
         self.sample_rate_label = QLabel("Sample Rate (Hz):")
-        button_layout.addWidget(self.sample_rate_label, 2, 0)
+        button_layout.addWidget(self.sample_rate_label, next_row, 0)
 
         self.sample_rate_input = QLineEdit()
         self.sample_rate_input.setValidator(QIntValidator(1, 5000000))
         self.sample_rate_input.setText("1000")
-        button_layout.addWidget(self.sample_rate_input, 2, 1)
+        button_layout.addWidget(self.sample_rate_input, next_row, 1)
         self.sample_rate_input.returnPressed.connect(self.handle_sample_rate_input)
 
         # Number of Samples input
         self.num_samples_label = QLabel("Number of Samples:")
-        button_layout.addWidget(self.num_samples_label, 3, 0)
+        button_layout.addWidget(self.num_samples_label, next_row + 1, 0)
 
         self.num_samples_input = QLineEdit()
         self.num_samples_input.setValidator(QIntValidator(1, 1023))
         self.num_samples_input.setText("300")
-        button_layout.addWidget(self.num_samples_input, 3, 1)
+        button_layout.addWidget(self.num_samples_input, next_row + 1, 1)
         self.num_samples_input.returnPressed.connect(self.send_num_samples_command)
 
         # Control buttons layout
@@ -418,7 +430,7 @@ class SPIDisplay(QWidget):
         self.single_button.clicked.connect(self.start_single_capture)
         control_buttons_layout.addWidget(self.single_button)
 
-        button_layout.addLayout(control_buttons_layout, 4, 0, 1, 3)
+        button_layout.addLayout(control_buttons_layout, next_row + 2, 0, 1, 2)
 
         # Cursor for measurement
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
@@ -510,7 +522,7 @@ class SPIDisplay(QWidget):
         if period16 > 2**16:
             prescaler = math.ceil(period16 / (2**16))
             period16 = int((72e6 / prescaler) / trigger_freq)
-            print(f"Period timer 16 set to {period16}, Timer 16 prescalar is {prescaler}")
+        print(f"Period timer 16 set to {period16}, Timer 16 prescalar is {prescaler}")
         try:
             self.worker.serial.write(b'4')
             time.sleep(0.01)
@@ -536,44 +548,30 @@ class SPIDisplay(QWidget):
         except Exception as e:
             print(f"Failed to update trigger timer: {e}")
 
-    def toggle_trigger_mode(self, group_idx):
-        trigger_channel = self.trigger_channels[group_idx]
-        if trigger_channel == 'SS':
-            channel_idx = 3 * group_idx
-        elif trigger_channel == 'Data':
-            channel_idx = 3 * group_idx + 1
+    def toggle_trigger_mode(self, group_idx, line):
+        group_config = self.group_configs[group_idx]
+        if line == 'SS':
+            channel_idx = group_config['ss_channel']
+            button = self.ss_trigger_mode_buttons[group_idx]
+        elif line == 'Data':
+            channel_idx = group_config['data_channel']
+            button = self.data_trigger_mode_buttons[group_idx]
+        elif line == 'Clk':
+            channel_idx = group_config['clock_channel']
+            button = self.clock_trigger_mode_buttons[group_idx]
         else:
-            channel_idx = 3 * group_idx + 2
+            return
 
         # Cycle through trigger modes
-        current_mode_idx = self.trigger_mode_options.index(self.current_trigger_modes[channel_idx])
+        current_mode = self.current_trigger_modes[channel_idx]
+        current_mode_idx = self.trigger_mode_options.index(current_mode)
         new_mode_idx = (current_mode_idx + 1) % len(self.trigger_mode_options)
         new_mode = self.trigger_mode_options[new_mode_idx]
         self.current_trigger_modes[channel_idx] = new_mode
-        self.trigger_mode_buttons[group_idx].setText(new_mode)
+        button.setText(f"{line} - {new_mode}")
         self.worker.set_trigger_mode(channel_idx, new_mode)
         self.send_trigger_edge_command()
         self.send_trigger_pins_command()
-
-    def toggle_trigger_channel(self, group_idx):
-        # Cycle through trigger channels
-        current_channel = self.trigger_channels[group_idx]
-        current_idx = self.trigger_channel_options.index(current_channel)
-        new_idx = (current_idx + 1) % len(self.trigger_channel_options)
-        new_channel = self.trigger_channel_options[new_idx]
-        self.trigger_channels[group_idx] = new_channel
-        self.trigger_channel_buttons[group_idx].setText(new_channel)
-        self.worker.set_trigger_channel(group_idx, new_channel)
-        # Update the trigger mode button text to reflect the trigger mode for the new channel
-        if new_channel == 'SS':
-            channel_idx = 3 * group_idx
-        elif new_channel == 'Data':
-            channel_idx = 3 * group_idx + 1
-        else:
-            channel_idx = 3 * group_idx + 2
-        current_mode = self.current_trigger_modes[channel_idx]
-        self.trigger_mode_buttons[group_idx].setText(current_mode)
-        print(f"Trigger channel for group {group_idx+1} set to {new_channel}")
 
     def is_light_color(self, hex_color):
         hex_color = hex_color.lstrip('#')
@@ -582,9 +580,10 @@ class SPIDisplay(QWidget):
         return luminance > 0.5
 
     def toggle_channel_group(self, group_idx, is_checked):
-        ss_idx = 3 * group_idx
-        data_idx = 3 * group_idx + 1
-        clk_idx = 3 * group_idx + 2
+        group_config = self.group_configs[group_idx]
+        ss_idx = group_config['ss_channel']
+        data_idx = group_config['data_channel']
+        clk_idx = group_config['clock_channel']
         self.channel_visibility[ss_idx] = is_checked
         self.channel_visibility[data_idx] = is_checked
         self.channel_visibility[clk_idx] = is_checked
@@ -727,10 +726,14 @@ class SPIDisplay(QWidget):
             self.group_configs[group_idx] = new_config
             print(f"Configuration for group {group_idx+1} updated: {new_config}")
             # Update labels on the button to reflect new channel assignments
-            ss_channel = new_config['ss_channel'] + 1
-            data_channel = new_config['data_channel'] + 1
-            clock_channel = new_config['clock_channel'] + 1
-            label = f"SPI {group_idx+1}\nCh{ss_channel}:SS\nCh{data_channel}:Data\nCh{clock_channel}:Clk"
+            ss_channel = new_config['ss_channel']
+            data_channel = new_config['data_channel']
+            clock_channel = new_config['clock_channel']
+            label = f"SPI {group_idx+1}\nCh{ss_channel+1}:SS\nCh{data_channel+1}:Data\nCh{clock_channel+1}:Clk"
             self.channel_buttons[group_idx].setText(label)
+            # Update trigger buttons to reflect new channels
+            self.ss_trigger_mode_buttons[group_idx].setText(f"SS - {self.current_trigger_modes[ss_channel]}")
+            self.data_trigger_mode_buttons[group_idx].setText(f"Data - {self.current_trigger_modes[data_channel]}")
+            self.clock_trigger_mode_buttons[group_idx].setText(f"Clk - {self.current_trigger_modes[clock_channel]}")
             # Clear data buffers
             self.clear_data_buffers()

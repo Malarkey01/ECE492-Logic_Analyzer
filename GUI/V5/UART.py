@@ -1,4 +1,4 @@
-# UART.py
+# UART.py:
 
 import sys
 import serial

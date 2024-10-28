@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QRadioButton,
     QButtonGroup,
+    QSizePolicy,
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
@@ -37,8 +38,7 @@ class SerialWorker(QThread):
         super().__init__()
         self.is_running = True
         self.channels = channels
-        self.trigger_modes = ['No Trigger'] * 8  # Updated to match channel count
-        self.trigger_channels = ['SCL'] * 4  # Default to SCL for each group
+        self.trigger_modes = ['No Trigger'] * channels  # One per channel
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
@@ -48,13 +48,10 @@ class SerialWorker(QThread):
     def set_trigger_mode(self, channel_idx, mode):
         self.trigger_modes[channel_idx] = mode
 
-    def set_trigger_channel(self, group_idx, channel_name):
-        self.trigger_channels[group_idx] = channel_name
-
     def run(self):
         pre_trigger_buffer_size = 1000
         data_buffer = []
-        triggered = [False] * 4  # 4 groups for I2C
+        triggered = [False] * self.channels  # One per channel
 
         while self.is_running:
             if self.serial.in_waiting:
@@ -66,35 +63,21 @@ class SerialWorker(QThread):
                         if len(data_buffer) > pre_trigger_buffer_size:
                             data_buffer.pop(0)
 
-                        for i in range(4):
+                        for i in range(self.channels):
                             if not triggered[i]:
                                 last_value = data_buffer[-2] if len(data_buffer) >= 2 else None
                                 if last_value is not None:
-                                    # Extract bits for SDA and SCL
-                                    current_sda = (data_value >> (2 * i)) & 1
-                                    current_scl = (data_value >> (2 * i + 1)) & 1
-                                    last_sda = (last_value >> (2 * i)) & 1
-                                    last_scl = (last_value >> (2 * i + 1)) & 1
+                                    current_line = (data_value >> i) & 1
+                                    last_line = (last_value >> i) & 1
 
-                                    # Determine which channel to use for trigger
-                                    trigger_channel = self.trigger_channels[i]
-                                    if trigger_channel == 'SDA':
-                                        current_line = current_sda
-                                        last_line = last_sda
-                                        channel_idx = 2 * i
-                                    else:
-                                        current_line = current_scl
-                                        last_line = last_scl
-                                        channel_idx = 2 * i + 1
-
-                                    mode = self.trigger_modes[channel_idx]
+                                    mode = self.trigger_modes[i]
                                     if mode != 'No Trigger':
                                         if mode == 'Rising Edge' and last_line == 0 and current_line == 1:
                                             triggered[i] = True
-                                            print(f"Trigger condition met on I2C group {i+1}: Rising Edge on {trigger_channel}")
+                                            print(f"Trigger condition met on channel {i+1}: Rising Edge")
                                         elif mode == 'Falling Edge' and last_line == 1 and current_line == 0:
                                             triggered[i] = True
-                                            print(f"Trigger condition met on I2C group {i+1}: Falling Edge on {trigger_channel}")
+                                            print(f"Trigger condition met on channel {i+1}: Falling Edge")
 
                         if any(triggered) or all(mode == 'No Trigger' for mode in self.trigger_modes):
                             self.data_ready.emit([data_value])
@@ -275,15 +258,13 @@ class I2CDisplay(QWidget):
         self.baudrate = baudrate
         self.channels = channels
 
-        self.data_buffer = [[] for _ in range(8)]  # 8 channels
-        self.channel_visibility = [False] * 8  # Visibility for each channel
+        self.data_buffer = [[] for _ in range(self.channels)]  # 8 channels
+        self.channel_visibility = [False] * self.channels  # Visibility for each channel
 
         self.is_single_capture = False
 
-        self.current_trigger_modes = ['No Trigger'] * 8
-        self.trigger_channels = ['SCL'] * 4
+        self.current_trigger_modes = ['No Trigger'] * self.channels
         self.trigger_mode_options = ['No Trigger', 'Rising Edge', 'Falling Edge']
-        self.trigger_channel_options = ['SDA', 'SCL']
 
         self.sample_rate = 1000  # Default sample rate in Hz
 
@@ -309,7 +290,7 @@ class I2CDisplay(QWidget):
 
         self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
         self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
-        self.plot.setYRange(-2, 2 * 8, padding=0)  # 8 channels
+        self.plot.setYRange(-2, 2 * self.channels, padding=0)  # 8 channels
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
@@ -320,7 +301,7 @@ class I2CDisplay(QWidget):
 
         self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
         self.curves = []
-        for i in range(8):  # 8 channels
+        for i in range(self.channels):  # 8 channels
             color = self.colors[i % len(self.colors)]
             curve = self.plot.plot(pen=pg.mkPen(color=color, width=2))
             curve.setVisible(self.channel_visibility[i])
@@ -330,51 +311,72 @@ class I2CDisplay(QWidget):
         main_layout.addLayout(button_layout)
 
         self.channel_buttons = []
-        self.trigger_mode_buttons = []
-        self.trigger_channel_buttons = []
+        self.sda_trigger_mode_buttons = []
+        self.scl_trigger_mode_buttons = []
 
         for i in range(4):
-            sda_channel = 2 * i + 1
-            scl_channel = 2 * i + 2
-            label = f"I2C {i+1}\nCh{sda_channel}:SDA\nCh{scl_channel}:SCL"
+            row = i * 2  # Increment by 2 for each group
+            sda_channel = 2 * i
+            scl_channel = 2 * i + 1
+            label = f"I2C {i+1}\nCh{sda_channel+1}:SDA\nCh{scl_channel+1}:SCL"
             button = I2CChannelButton(label, group_idx=i)
+
+            # Set size policy to expand vertically
+            button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel_group(idx, checked))
             button.configure_requested.connect(self.open_configuration_dialog)
-            button_layout.addWidget(button, i, 0)
+            button_layout.addWidget(button, row, 0, 2, 1)  # Span 2 rows, 1 column
+
+            # SDA Trigger Mode Button
+            sda_trigger_button = QPushButton(f"SDA - {self.current_trigger_modes[sda_channel]}")
+
+            # Set size policy to expand vertically
+            sda_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+
+            sda_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'SDA'))
+            button_layout.addWidget(sda_trigger_button, row, 1)
+
+            # SCL Trigger Mode Button
+            scl_trigger_button = QPushButton(f"SCL - {self.current_trigger_modes[scl_channel]}")
+
+            # Set size policy to expand vertically
+            scl_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+
+            scl_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'SCL'))
+            button_layout.addWidget(scl_trigger_button, row + 1, 1)
+
+            # Set row stretches to distribute space equally
+            button_layout.setRowStretch(row, 1)
+            button_layout.setRowStretch(row + 1, 1)
+
             self.channel_buttons.append(button)
+            self.sda_trigger_mode_buttons.append(sda_trigger_button)
+            self.scl_trigger_mode_buttons.append(scl_trigger_button)
 
-            # Trigger Mode Button
-            trigger_button = QPushButton(self.current_trigger_modes[2 * i + 1])  # Default to mode of SCL
-            trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx))
-            button_layout.addWidget(trigger_button, i, 1)
-            self.trigger_mode_buttons.append(trigger_button)
-
-            # Trigger Channel Button
-            trigger_channel_button = QPushButton(self.trigger_channels[i])  # Default to 'SCL'
-            trigger_channel_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_channel(idx))
-            button_layout.addWidget(trigger_channel_button, i, 2)
-            self.trigger_channel_buttons.append(trigger_channel_button)
+        # Calculate the starting row for the next set of widgets
+        next_row = 4 * 2  # 4 groups * 2 rows per group
 
         # Sample Rate input
         self.sample_rate_label = QLabel("Sample Rate (Hz):")
-        button_layout.addWidget(self.sample_rate_label, 4, 0)
+        button_layout.addWidget(self.sample_rate_label, next_row, 0)
 
         self.sample_rate_input = QLineEdit()
         self.sample_rate_input.setValidator(QIntValidator(1, 5000000))
         self.sample_rate_input.setText("1000")
-        button_layout.addWidget(self.sample_rate_input, 4, 1)
+        button_layout.addWidget(self.sample_rate_input, next_row, 1)
         self.sample_rate_input.returnPressed.connect(self.handle_sample_rate_input)
 
         # Number of Samples input
         self.num_samples_label = QLabel("Number of Samples:")
-        button_layout.addWidget(self.num_samples_label, 5, 0)
+        button_layout.addWidget(self.num_samples_label, next_row + 1, 0)
 
         self.num_samples_input = QLineEdit()
         self.num_samples_input.setValidator(QIntValidator(1, 1023))
         self.num_samples_input.setText("300")
-        button_layout.addWidget(self.num_samples_input, 5, 1)
+        button_layout.addWidget(self.num_samples_input, next_row + 1, 1)
         self.num_samples_input.returnPressed.connect(self.send_num_samples_command)
 
         # Control buttons layout
@@ -388,7 +390,7 @@ class I2CDisplay(QWidget):
         self.single_button.clicked.connect(self.start_single_capture)
         control_buttons_layout.addWidget(self.single_button)
 
-        button_layout.addLayout(control_buttons_layout, 6, 0, 1, 3)
+        button_layout.addLayout(control_buttons_layout, next_row + 2, 0, 1, 2)
 
         # Cursor for measurement
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
@@ -398,6 +400,7 @@ class I2CDisplay(QWidget):
         self.plot.addItem(self.cursor_label)
         self.update_cursor_position()
         self.cursor.sigPositionChanged.connect(self.update_cursor_position)
+
 
     def handle_sample_rate_input(self):
         try:
@@ -506,38 +509,27 @@ class I2CDisplay(QWidget):
         except Exception as e:
             print(f"Failed to update trigger timer: {e}")
 
-    def toggle_trigger_mode(self, group_idx):
-        trigger_channel = self.trigger_channels[group_idx]
-        if trigger_channel == 'SDA':
+    def toggle_trigger_mode(self, group_idx, line):
+        if line == 'SDA':
             channel_idx = 2 * group_idx
-        else:
+            button = self.sda_trigger_mode_buttons[group_idx]
+        elif line == 'SCL':
             channel_idx = 2 * group_idx + 1
+            button = self.scl_trigger_mode_buttons[group_idx]
+        else:
+            return
 
         # Cycle through trigger modes
-        current_mode_idx = self.trigger_mode_options.index(self.current_trigger_modes[channel_idx])
+        current_mode = self.current_trigger_modes[channel_idx]
+        current_mode_idx = self.trigger_mode_options.index(current_mode)
         new_mode_idx = (current_mode_idx + 1) % len(self.trigger_mode_options)
         new_mode = self.trigger_mode_options[new_mode_idx]
         self.current_trigger_modes[channel_idx] = new_mode
-        self.trigger_mode_buttons[group_idx].setText(new_mode)
+        button.setText(f"{line} - {new_mode}")
         self.worker.set_trigger_mode(channel_idx, new_mode)
         self.send_trigger_edge_command()
         self.send_trigger_pins_command()
 
-    def toggle_trigger_channel(self, group_idx):
-        # Toggle between 'SDA' and 'SCL'
-        current_channel = self.trigger_channels[group_idx]
-        new_channel = 'SDA' if current_channel == 'SCL' else 'SCL'
-        self.trigger_channels[group_idx] = new_channel
-        self.trigger_channel_buttons[group_idx].setText(new_channel)
-        self.worker.set_trigger_channel(group_idx, new_channel)
-        # Update the trigger mode button text to reflect the trigger mode for the new channel
-        if new_channel == 'SDA':
-            channel_idx = 2 * group_idx
-        else:
-            channel_idx = 2 * group_idx + 1
-        current_mode = self.current_trigger_modes[channel_idx]
-        self.trigger_mode_buttons[group_idx].setText(current_mode)
-        print(f"Trigger channel for group {group_idx+1} set to {new_channel}")
 
     def is_light_color(self, hex_color):
         hex_color = hex_color.lstrip('#')

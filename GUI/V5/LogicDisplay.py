@@ -1,4 +1,4 @@
-# LogicDisplay.py
+# LogicDisplay.py:
 
 import sys
 from PyQt6.QtWidgets import (
@@ -6,10 +6,11 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
     QVBoxLayout,
-    QMenuBar,
-    QMenu,
+    QHBoxLayout,
+    QButtonGroup,
+    QPushButton,
 )
-from PyQt6.QtGui import QAction  # Import QAction from PyQt6.QtGui
+from PyQt6.QtGui import QAction
 from PyQt6.QtCore import Qt
 
 from aesthetic import get_icon
@@ -36,29 +37,65 @@ class LogicDisplay(QMainWindow):
         self.load_module('Signal')
 
     def init_ui(self):
-        # Create a menu bar
-        menu_bar = self.menuBar()
+        # Create a central widget with vertical layout
+        central_widget = QWidget()
+        central_layout = QVBoxLayout(central_widget)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
 
-        # Add a dropdown menu
-        mode_menu = menu_bar.addMenu('Mode')
+        # Create a widget for the buttons
+        button_widget = QWidget()
+        button_layout = QHBoxLayout(button_widget)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(0)
 
-        # Create actions for each mode
-        signal_action = QAction('Signal', self)
-        i2c_action = QAction('I2C', self)
-        spi_action = QAction('SPI', self)
-        uart_action = QAction('UART', self)
+        # Create buttons for each mode
+        self.signal_button = QPushButton('Signal')
+        self.i2c_button = QPushButton('I2C')
+        self.spi_button = QPushButton('SPI')
+        self.uart_button = QPushButton('UART')
 
-        # Add actions to the mode menu
-        mode_menu.addAction(signal_action)
-        mode_menu.addAction(i2c_action)
-        mode_menu.addAction(spi_action)
-        mode_menu.addAction(uart_action)
+        # Make buttons checkable
+        self.signal_button.setCheckable(True)
+        self.i2c_button.setCheckable(True)
+        self.spi_button.setCheckable(True)
+        self.uart_button.setCheckable(True)
 
-        # Connect actions to the handler
-        signal_action.triggered.connect(lambda: self.load_module('Signal'))
-        i2c_action.triggered.connect(lambda: self.load_module('I2C'))
-        spi_action.triggered.connect(lambda: self.load_module('SPI'))
-        uart_action.triggered.connect(lambda: self.load_module('UART'))
+        # Create a button group for exclusive checking
+        self.mode_button_group = QButtonGroup()
+        self.mode_button_group.setExclusive(True)
+        self.mode_button_group.addButton(self.signal_button)
+        self.mode_button_group.addButton(self.i2c_button)
+        self.mode_button_group.addButton(self.spi_button)
+        self.mode_button_group.addButton(self.uart_button)
+
+        # Set the default checked button
+        self.signal_button.setChecked(True)
+
+        # Add buttons to the layout
+        button_layout.addWidget(self.signal_button)
+        button_layout.addWidget(self.i2c_button)
+        button_layout.addWidget(self.spi_button)
+        button_layout.addWidget(self.uart_button)
+
+        # Connect buttons to the handler
+        self.signal_button.clicked.connect(lambda: self.load_module('Signal'))
+        self.i2c_button.clicked.connect(lambda: self.load_module('I2C'))
+        self.spi_button.clicked.connect(lambda: self.load_module('SPI'))
+        self.uart_button.clicked.connect(lambda: self.load_module('UART'))
+
+        # Create a widget to hold the current module
+        self.module_widget = QWidget()
+        self.module_layout = QVBoxLayout(self.module_widget)
+        self.module_layout.setContentsMargins(0, 0, 0, 0)
+        self.module_layout.setSpacing(0)
+
+        # Add the button widget and the module widget to the central layout
+        central_layout.addWidget(button_widget)
+        central_layout.addWidget(self.module_widget)
+
+        # Set the central widget
+        self.setCentralWidget(central_widget)
 
     def load_module(self, module_name):
         # Remove the existing module widget if any
@@ -67,6 +104,13 @@ class LogicDisplay(QMainWindow):
             self.current_module.deleteLater()
             self.current_module = None
 
+        # Clear the module_layout
+        while self.module_layout.count():
+            item = self.module_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
         # Reset baud rate to default when switching modes
         if module_name != 'UART':
             self.baudrate = self.default_baudrate
@@ -74,24 +118,26 @@ class LogicDisplay(QMainWindow):
         # Load the selected module
         if module_name == 'Signal':
             self.current_module = SignalDisplay(self.port, self.baudrate, self.channels)
+            self.signal_button.setChecked(True)
         elif module_name == 'I2C':
             self.current_module = I2CDisplay(self.port, self.baudrate)
+            self.i2c_button.setChecked(True)
         elif module_name == 'SPI':
             self.current_module = SPIDisplay(self.port, self.baudrate)
+            self.spi_button.setChecked(True)
         elif module_name == 'UART':
             # Update baud rate if changed in UART mode
             self.current_module = UARTDisplay(self.port, self.baudrate)
             self.current_module.baudrate_changed.connect(self.update_baudrate)
+            self.uart_button.setChecked(True)
 
         if self.current_module:
-            self.setCentralWidget(self.current_module)
+            self.module_layout.addWidget(self.current_module)
             self.current_module.show()
         else:
             # Placeholder if the module is not implemented
             placeholder_widget = QWidget()
-            placeholder_layout = QVBoxLayout(placeholder_widget)
-            placeholder_layout.addWidget(QWidget())
-            self.setCentralWidget(placeholder_widget)
+            self.module_layout.addWidget(placeholder_widget)
 
     def update_baudrate(self, baudrate):
         self.baudrate = baudrate
