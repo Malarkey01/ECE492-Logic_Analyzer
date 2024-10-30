@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
+from collections import deque
 from aesthetic import get_icon
 import time
 
@@ -61,6 +62,7 @@ class UARTDisplay(QWidget):
         self.default_baudrate = baudrate
         self.channels = channels
 
+        self.text_buffers = [deque(maxlen=1000) for _ in range(self.channels)]  # Limit to last 1000 messages
         self.text_displays = []
         self.channel_enabled = [False] * self.channels
 
@@ -69,6 +71,7 @@ class UARTDisplay(QWidget):
         self.worker = SerialWorker(self.port, self.default_baudrate, channels=self.channels)
         self.worker.data_ready.connect(self.update_text_displays)
         self.worker.start()
+
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -165,7 +168,12 @@ class UARTDisplay(QWidget):
     def update_text_displays(self, data_dict):
         for channel_idx, data in data_dict.items():
             if self.channel_enabled[channel_idx]:
-                self.text_displays[channel_idx].append(data)
+                self.text_buffers[channel_idx].append(data)
+                # Update the QTextEdit with the content of the buffer
+                self.text_displays[channel_idx].setPlainText('\n'.join(self.text_buffers[channel_idx]))
+                # Scroll to the end
+                self.text_displays[channel_idx].verticalScrollBar().setValue(self.text_displays[channel_idx].verticalScrollBar().maximum())
+
 
     def closeEvent(self, event):
         self.worker.stop_worker()

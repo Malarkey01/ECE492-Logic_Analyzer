@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
+from collections import deque
 from InterfaceCommands import (
     get_trigger_edge_command,
     get_trigger_pins_command,
@@ -50,7 +51,7 @@ class SerialWorker(QThread):
 
     def run(self):
         pre_trigger_buffer_size = 1000
-        data_buffer = []
+        data_buffer = deque(maxlen=pre_trigger_buffer_size)
         triggered = [False] * self.channels  # One per channel
 
         while self.is_running:
@@ -60,8 +61,6 @@ class SerialWorker(QThread):
                     try:
                         data_value = int(line.strip())
                         data_buffer.append(data_value)
-                        if len(data_buffer) > pre_trigger_buffer_size:
-                            data_buffer.pop(0)
 
                         for i in range(self.channels):
                             if not triggered[i]:
@@ -258,7 +257,7 @@ class I2CDisplay(QWidget):
         self.baudrate = baudrate
         self.channels = channels
 
-        self.data_buffer = [[] for _ in range(self.channels)]  # 8 channels
+        self.data_buffer = [deque(maxlen=1024) for _ in range(self.channels)]  # 8 channels
         self.channel_visibility = [False] * self.channels  # Visibility for each channel
 
         self.is_single_capture = False
@@ -279,6 +278,7 @@ class I2CDisplay(QWidget):
         self.worker = SerialWorker(self.port, self.baudrate, channels=self.channels)
         self.worker.data_ready.connect(self.handle_data)
         self.worker.start()
+
 
     def setup_ui(self):
         main_layout = QHBoxLayout(self)
@@ -628,19 +628,18 @@ class I2CDisplay(QWidget):
         self.single_button.setStyleSheet("")
 
     def clear_data_buffers(self):
-        self.data_buffer = [[] for _ in range(8)]  # 8 channels
+        self.data_buffer = [deque(maxlen=1024) for _ in range(self.channels)]
 
     def handle_data(self, data_list):
         if self.is_reading:
             for data_value in data_list:
                 # Store raw data for plotting
-                for i in range(8):
+                for i in range(self.channels):
                     bit = (data_value >> i) & 1
                     self.data_buffer[i].append(bit)
-                    if len(self.data_buffer[i]) > 1024:
-                        self.data_buffer[i].pop(0)
             if self.is_single_capture and all(len(buf) >= 1024 for buf in self.data_buffer):
                 self.stop_single_capture()
+
 
     def update_plot(self):
         for i in range(8):

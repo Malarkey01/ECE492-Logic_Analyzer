@@ -19,11 +19,15 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QIcon, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
+from collections import deque
 from InterfaceCommands import (
     get_trigger_edge_command,
     get_trigger_pins_command,
 )
 from aesthetic import get_icon
+
+bufferSize = 256    # Previous is 1024
+preTriggerBufferSize = 200  # Previous is 1000
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -43,8 +47,8 @@ class SerialWorker(QThread):
         self.trigger_modes[channel_idx] = mode
 
     def run(self):
-        pre_trigger_buffer_size = 1000
-        data_buffer = []
+        pre_trigger_buffer_size = preTriggerBufferSize
+        data_buffer = deque(maxlen=pre_trigger_buffer_size)
         triggered = [False] * self.channels
 
         while self.is_running:
@@ -54,8 +58,6 @@ class SerialWorker(QThread):
                     try:
                         data_value = int(line.strip())
                         data_buffer.append(data_value)
-                        if len(data_buffer) > pre_trigger_buffer_size:
-                            data_buffer.pop(0)
 
                         for i in range(self.channels):
                             if not triggered[i] and self.trigger_modes[i] != 'No Trigger':
@@ -145,7 +147,7 @@ class SignalDisplay(QWidget):
         self.baudrate = baudrate
         self.channels = channels
 
-        self.data_buffer = [[] for _ in range(self.channels)]
+        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]
         self.channel_visibility = [False] * self.channels
 
         self.is_single_capture = False
@@ -171,7 +173,7 @@ class SignalDisplay(QWidget):
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
         self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
-        self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
+        self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
@@ -459,7 +461,7 @@ class SignalDisplay(QWidget):
         self.single_button.setStyleSheet("")
 
     def clear_data_buffers(self):
-        self.data_buffer = [[] for _ in range(self.channels)]
+        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]
 
     def handle_data(self, data_list):
         if self.is_reading:
@@ -467,9 +469,7 @@ class SignalDisplay(QWidget):
                 for i in range(self.channels):
                     bit_value = (data_value >> i) & 1
                     self.data_buffer[i].append(bit_value)
-                    if len(self.data_buffer[i]) > 1024:
-                        self.data_buffer[i].pop(0)
-            if self.is_single_capture and all(len(buf) >= 1024 for buf in self.data_buffer):
+            if self.is_single_capture and all(len(buf) >= bufferSize for buf in self.data_buffer):
                 self.stop_single_capture()
 
     def update_plot(self):
