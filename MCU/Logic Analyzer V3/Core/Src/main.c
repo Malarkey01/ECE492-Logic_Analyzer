@@ -32,6 +32,7 @@
 /* USER CODE END PTD */
 uint16_t buttonState = 0;
 #define BUFFER_SIZE 1024
+//#define BUFFER_SIZE 16384 // Default size is 1024
 uint16_t buffer[BUFFER_SIZE];
 int bufferPointer = 0;
 uint8_t Buff[10];
@@ -146,12 +147,10 @@ int main(void)
   	  	  		 HAL_Delay(1);
   	  	  		 val++;
 
-  	  	  		 if(val == 1024){
+  	  	  		 if(val == BUFFER_SIZE){
   	  	  			 val = 0;
   	  	  		 }
   	  	  		 if (val == bufferPointer) {
-  	  	  			sprintf(msg, "%hu\r\n", trigPointer);
-  	  	  		  	CDC_Transmit_FS((uint8_t *)msg, strlen(msg));
   	  	  			HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
   	  	  			state = preTrigger;
   	  	  		 }
@@ -398,29 +397,12 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim) {
         uint16_t currentValue = GPIOB->IDR & 0xFFFF;
 
         // Check for a stable signal (potential disconnection)
-        if (currentValue == lastValue) {
-            stableCount++;
-            if (stableCount > DISCONNECT_THRESHOLD) {
-                // Clear the buffer if the pin is considered disconnected
-                memset(buffer, 0, sizeof(buffer));  // Clear the entire buffer
-                bufferPointer = 0;  // Reset the buffer pointer
-                state = preTrigger;  // Reset the state to preTrigger
-                trigger = 0;  // Clear the trigger
-                stableCount = 0;  // Reset the stability counter
-            }
-        } else {
-            // Reset the stability counter if the value changes
-            stableCount = 0;
-        }
-
-        // Update the last value
-        lastValue = currentValue;
 
         // Add 8-bit logic input to the buffer if not disconnected
         buffer[bufferPointer] = currentValue;
         // Increment pointer with circular logic
         bufferPointer++;
-        bufferPointer &= 0x03FF;
+        bufferPointer &= 0x03FF; // Default: 0x3FFF
     }
 }
 
