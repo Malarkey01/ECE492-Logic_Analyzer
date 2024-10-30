@@ -31,6 +31,8 @@ from InterfaceCommands import (
 )
 from aesthetic import get_icon
 
+bufferSize = 1024    # Default is 1024
+preTriggerBufferSize = 1000  # Default is 1000
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -257,7 +259,7 @@ class I2CDisplay(QWidget):
         self.baudrate = baudrate
         self.channels = channels
 
-        self.data_buffer = [deque(maxlen=1024) for _ in range(self.channels)]  # 8 channels
+        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]  # 8 channels
         self.channel_visibility = [False] * self.channels  # Visibility for each channel
 
         self.is_single_capture = False
@@ -289,7 +291,7 @@ class I2CDisplay(QWidget):
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
         self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
-        self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
+        self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)  # 8 channels
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
@@ -303,7 +305,7 @@ class I2CDisplay(QWidget):
         self.curves = []
         for i in range(self.channels):  # 8 channels
             color = self.colors[i % len(self.colors)]
-            curve = self.plot.plot(pen=pg.mkPen(color=color, width=2))
+            curve = self.plot.plot(pen=pg.mkPen(color=color, width=4))
             curve.setVisible(self.channel_visibility[i])
             self.curves.append(curve)
 
@@ -412,7 +414,7 @@ class I2CDisplay(QWidget):
             print(f"Sample Rate set to {sample_rate} Hz, Period: {period} ticks")
             self.updateSampleTimer(int(period))
             self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
-            self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
+            self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
         except ValueError as e:
             print(f"Invalid sample rate: {e}")
 
@@ -628,7 +630,7 @@ class I2CDisplay(QWidget):
         self.single_button.setStyleSheet("")
 
     def clear_data_buffers(self):
-        self.data_buffer = [deque(maxlen=1024) for _ in range(self.channels)]
+        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]
 
     def handle_data(self, data_list):
         if self.is_reading:
@@ -637,7 +639,7 @@ class I2CDisplay(QWidget):
                 for i in range(self.channels):
                     bit = (data_value >> i) & 1
                     self.data_buffer[i].append(bit)
-            if self.is_single_capture and all(len(buf) >= 1024 for buf in self.data_buffer):
+            if self.is_single_capture and all(len(buf) >= bufferSize for buf in self.data_buffer):
                 self.stop_single_capture()
 
 

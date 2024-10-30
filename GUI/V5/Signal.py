@@ -26,8 +26,8 @@ from InterfaceCommands import (
 )
 from aesthetic import get_icon
 
-bufferSize = 256    # Previous is 1024
-preTriggerBufferSize = 200  # Previous is 1000
+bufferSize = 1024    # Default is 1024
+preTriggerBufferSize = 1000  # Default is 1000
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
@@ -262,7 +262,7 @@ class SignalDisplay(QWidget):
             print(f"Sample Rate set to {sample_rate} Hz, Period: {period} ticks")
             self.updateSampleTimer(int(period))
             self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
-            self.plot.setLimits(xMin=0, xMax=1024 / self.sample_rate)
+            self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
         except ValueError as e:
             print(f"Invalid sample rate: {e}")
 
