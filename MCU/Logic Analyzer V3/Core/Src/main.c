@@ -141,16 +141,16 @@ int main(void)
 
   	  	  		 trigger = 0;
   	  	  		 //Send_Large_USB_Data((void*)buffer, 150 * sizeof(uint16_t));
-
+				 counter++;
   	  	  		 sprintf(msg, "%hu\r\n", buffer[val]);
   	  	  		 CDC_Transmit_FS((uint8_t *)msg, strlen(msg));
   	  	  		 HAL_Delay(1);
   	  	  		 val++;
-
+/// creat a counter starting from 0 to 1024 and send the data from bufferpointer to 1024
   	  	  		 if(val == BUFFER_SIZE){
   	  	  			 val = 0;
   	  	  		 }
-  	  	  		 if (val == bufferPointer) {
+  	  	  		 if (counter == BUFFER_SIZE\) {
   	  	  			HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
   	  	  			state = preTrigger;
   	  	  		 }
@@ -386,12 +386,8 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim) {
                 state = triggerState;
                 trigPointer = bufferPointer;
                 // Start timer 16
-                check = 0;
                 HAL_TIM_Base_Start_IT(&htim16);
             }
-        }
-        if(trigger){
-        	check++;
         }
         // Read the current value from the input pin
         uint16_t currentValue = GPIOB->IDR & 0xFFFF;
