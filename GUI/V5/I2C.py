@@ -21,8 +21,10 @@ from PyQt6.QtWidgets import (
     QRadioButton,
     QButtonGroup,
     QSizePolicy,
+    QTextEdit,
+    QGroupBox,
 )
-from PyQt6.QtGui import QIcon, QIntValidator
+from PyQt6.QtGui import QIcon, QIntValidator, QTextCursor
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 from collections import deque
 from InterfaceCommands import (
@@ -35,13 +37,26 @@ bufferSize = 1024    # Default is 1024
 preTriggerBufferSize = 1000  # Default is 1000
 
 class SerialWorker(QThread):
-    data_ready = pyqtSignal(list)
+    data_ready = pyqtSignal(int)  # For raw data values
+    decoded_message_ready = pyqtSignal(dict)  # For decoded messages
 
-    def __init__(self, port, baudrate, channels=8):
+    def __init__(self, port, baudrate, channels=8, group_configs=None):
         super().__init__()
         self.is_running = True
         self.channels = channels
-        self.trigger_modes = ['No Trigger'] * channels  # One per channel
+        self.group_configs = group_configs if group_configs else [{} for _ in range(4)]
+        self.trigger_modes = ['No Trigger'] * self.channels
+        # Initialize I2C decoding variables for each group
+        self.states = ['IDLE'] * len(self.group_configs)
+        self.bit_buffers = [[] for _ in range(len(self.group_configs))]
+        self.current_bytes = [0] * len(self.group_configs)
+        self.bit_counts = [0] * len(self.group_configs)
+        self.decoded_messages = [[] for _ in range(len(self.group_configs))]
+        self.scl_last_values = [1] * len(self.group_configs)
+        self.sda_last_values = [1] * len(self.group_configs)
+        self.messages = [[] for _ in range(len(self.group_configs))]
+        self.error_flags = [False] * len(self.group_configs)
+
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
@@ -52,9 +67,7 @@ class SerialWorker(QThread):
         self.trigger_modes[channel_idx] = mode
 
     def run(self):
-        pre_trigger_buffer_size = 1000
-        data_buffer = deque(maxlen=pre_trigger_buffer_size)
-        triggered = [False] * self.channels  # One per channel
+        data_buffer = deque(maxlen=1000)
 
         while self.is_running:
             if self.serial.in_waiting:
@@ -63,34 +76,119 @@ class SerialWorker(QThread):
                     try:
                         data_value = int(line.strip())
                         data_buffer.append(data_value)
-
-                        for i in range(self.channels):
-                            if not triggered[i]:
-                                last_value = data_buffer[-2] if len(data_buffer) >= 2 else None
-                                if last_value is not None:
-                                    current_line = (data_value >> i) & 1
-                                    last_line = (last_value >> i) & 1
-
-                                    mode = self.trigger_modes[i]
-                                    if mode != 'No Trigger':
-                                        if mode == 'Rising Edge' and last_line == 0 and current_line == 1:
-                                            triggered[i] = True
-                                            print(f"Trigger condition met on channel {i+1}: Rising Edge")
-                                        elif mode == 'Falling Edge' and last_line == 1 and current_line == 0:
-                                            triggered[i] = True
-                                            print(f"Trigger condition met on channel {i+1}: Falling Edge")
-
-                        if any(triggered) or all(mode == 'No Trigger' for mode in self.trigger_modes):
-                            self.data_ready.emit([data_value])
-
+                        self.data_ready.emit(data_value)  # Emit data_value for plotting
+                        self.decode_i2c(data_value)
                     except ValueError:
                         continue
+
+    def decode_i2c(self, data_value):
+        for group_idx, group_config in enumerate(self.group_configs):
+            scl_channel = group_config.get('clock_channel', 2) - 1
+            sda_channel = group_config.get('data_channel', 1) - 1
+            address_width = group_config.get('address_width', 8)
+            data_format = group_config.get('data_format', 'Hexadecimal')
+
+            # Extract SCL and SDA values
+            scl = (data_value >> scl_channel) & 1
+            sda = (data_value >> sda_channel) & 1
+
+            # Detect edges on SCL and SDA
+            scl_last = self.scl_last_values[group_idx]
+            sda_last = self.sda_last_values[group_idx]
+            scl_edge = scl != scl_last
+            sda_edge = sda != sda_last
+
+            # State machine for I2C decoding
+            state = self.states[group_idx]
+            current_byte = self.current_bytes[group_idx]
+            bit_count = self.bit_counts[group_idx]
+            message = self.messages[group_idx]
+            error_flag = self.error_flags[group_idx]
+
+            # Determine the expected number of bits for the address
+            if address_width == 7:
+                expected_bits = address_width + 1  # Include R/W bit
+            else:
+                expected_bits = address_width  # 8 bits, no extra bit
+
+            if state == 'IDLE':
+                if sda_edge and sda == 0 and scl == 1:
+                    # Start condition detected
+                    state = 'START'
+                    current_byte = 0
+                    bit_count = 0
+                    message = []
+                    error_flag = False
+            elif state == 'START':
+                if scl_edge and scl == 1:
+                    # Rising edge of SCL, sample SDA
+                    current_byte = (current_byte << 1) | sda
+                    bit_count += 1
+                    if bit_count == expected_bits:
+                        # Address byte received
+                        if address_width == 7:
+                            address = current_byte >> 1
+                            rw_bit = current_byte & 1
+                            message.append({'type': 'Address', 'data': address, 'rw': rw_bit})
+                        else:
+                            address = current_byte
+                            message.append({'type': 'Address', 'data': address})
+                        bit_count = 0
+                        current_byte = 0
+                        state = 'ACK'
+            elif state == 'ACK':
+                if scl_edge and scl == 1:
+                    # Sample ACK bit
+                    ack = sda
+                    message.append({'type': 'ACK', 'data': ack})
+                    state = 'DATA'
+            elif state == 'DATA':
+                if scl_edge and scl == 1:
+                    # Rising edge of SCL, sample SDA
+                    current_byte = (current_byte << 1) | sda
+                    bit_count += 1
+                    if bit_count == 8:
+                        # Data byte received
+                        message.append({'type': 'Data', 'data': current_byte})
+                        bit_count = 0
+                        current_byte = 0
+                        state = 'ACK2'
+            elif state == 'ACK2':
+                if scl_edge and scl == 1:
+                    # Sample ACK bit
+                    ack = sda
+                    message.append({'type': 'ACK', 'data': ack})
+                    state = 'DATA'
+            if sda_edge and sda == 1 and scl == 1:
+                # Stop condition detected
+                # Emit the decoded message
+                self.decoded_message_ready.emit({
+                    'group_idx': group_idx,
+                    'message': message,
+                    'error': error_flag,
+                })
+                # Reset state
+                state = 'IDLE'
+                current_byte = 0
+                bit_count = 0
+                message = []
+                error_flag = False
+
+            # Update the stored states
+            self.states[group_idx] = state
+            self.current_bytes[group_idx] = current_byte
+            self.bit_counts[group_idx] = bit_count
+            self.messages[group_idx] = message
+            self.error_flags[group_idx] = error_flag
+
+            # Update last values
+            self.scl_last_values[group_idx] = scl
+            self.sda_last_values[group_idx] = sda
 
     def stop_worker(self):
         self.is_running = False
         if self.serial.is_open:
             self.serial.close()
-
 
 class FixedYViewBox(pg.ViewBox):
     def __init__(self, *args, **kwargs):
@@ -122,7 +220,6 @@ class FixedYViewBox(pg.ViewBox):
                 x = t
         super().translateBy(x=x, y=y)
 
-
 class EditableButton(QPushButton):
     def __init__(self, label, parent=None):
         super().__init__(label, parent)
@@ -143,7 +240,6 @@ class EditableButton(QPushButton):
                 self.setText(new_label)
         elif action == reset_action:
             self.setText(self.default_label)
-
 
 class I2CChannelButton(EditableButton):
     configure_requested = pyqtSignal(int)  # Signal to notify when configure is requested
@@ -168,7 +264,6 @@ class I2CChannelButton(EditableButton):
             self.setText(self.default_label)
         elif action == configure_action:
             self.configure_requested.emit(self.group_idx)  # Emit signal to open configuration dialog
-
 
 class I2CConfigDialog(QDialog):
     def __init__(self, current_config, parent=None):
@@ -214,10 +309,10 @@ class I2CConfigDialog(QDialog):
         address_layout.addWidget(self.address_8bit)
         layout.addLayout(address_layout)
 
-        if self.current_config.get('address_width', 8) == 7:
-            self.address_7bit.setChecked(True)
-        else:
+        if self.current_config.get('address_width', 8) == 8:
             self.address_8bit.setChecked(True)
+        else:
+            self.address_7bit.setChecked(True)
 
         # Data Format Selection
         format_layout = QHBoxLayout()
@@ -249,7 +344,6 @@ class I2CConfigDialog(QDialog):
             'data_format': self.format_combo.currentText(),
         }
 
-
 class I2CDisplay(QWidget):
     def __init__(self, port, baudrate, channels=8):
         super().__init__()
@@ -269,7 +363,14 @@ class I2CDisplay(QWidget):
 
         self.sample_rate = 1000  # Default sample rate in Hz
 
-        self.group_configs = [{} for _ in range(4)]  # Store configurations for each group
+        self.group_configs = [{'address_width': 8} for _ in range(4)]  # Store configurations for each group
+        self.i2c_group_enabled = [False] * 4  # Track which I2C groups are enabled
+
+        # Initialize self.decoded_texts before calling setup_ui()
+        self.decoded_texts = []
+
+        # Initialize decoded messages per group
+        self.decoded_messages_per_group = {i: [] for i in range(4)}
 
         self.setup_ui()
         self.timer = QTimer()
@@ -277,16 +378,19 @@ class I2CDisplay(QWidget):
 
         self.is_reading = False
 
-        self.worker = SerialWorker(self.port, self.baudrate, channels=self.channels)
-        self.worker.data_ready.connect(self.handle_data)
+        self.worker = SerialWorker(self.port, self.baudrate, channels=self.channels, group_configs=self.group_configs)
+        self.worker.data_ready.connect(self.handle_data_value)
+        self.worker.decoded_message_ready.connect(self.display_decoded_message)
         self.worker.start()
 
-
     def setup_ui(self):
-        main_layout = QHBoxLayout(self)
+        main_layout = QVBoxLayout(self)
+
+        plot_layout = QHBoxLayout()
+        main_layout.addLayout(plot_layout)
 
         self.graph_layout = pg.GraphicsLayoutWidget()
-        main_layout.addWidget(self.graph_layout)
+        plot_layout.addWidget(self.graph_layout, stretch=3)  # Allocate more space to the graph
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
@@ -310,7 +414,7 @@ class I2CDisplay(QWidget):
             self.curves.append(curve)
 
         button_layout = QGridLayout()
-        main_layout.addLayout(button_layout)
+        plot_layout.addLayout(button_layout, stretch=1)  # Allocate less space to the control panel
 
         self.channel_buttons = []
         self.sda_trigger_mode_buttons = []
@@ -323,8 +427,8 @@ class I2CDisplay(QWidget):
             label = f"I2C {i+1}\nCh{sda_channel+1}:SDA\nCh{scl_channel+1}:SCL"
             button = I2CChannelButton(label, group_idx=i)
 
-            # Set size policy to expand vertically
-            button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            # Set size policy to Preferred to prevent excessive expansion
+            button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
             button.setCheckable(True)
             button.setChecked(False)
@@ -335,8 +439,8 @@ class I2CDisplay(QWidget):
             # SDA Trigger Mode Button
             sda_trigger_button = QPushButton(f"SDA - {self.current_trigger_modes[sda_channel]}")
 
-            # Set size policy to expand vertically
-            sda_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            # Set size policy to Preferred
+            sda_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
             sda_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'SDA'))
             button_layout.addWidget(sda_trigger_button, row, 1)
@@ -344,8 +448,8 @@ class I2CDisplay(QWidget):
             # SCL Trigger Mode Button
             scl_trigger_button = QPushButton(f"SCL - {self.current_trigger_modes[scl_channel]}")
 
-            # Set size policy to expand vertically
-            scl_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            # Set size policy to Preferred
+            scl_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
             scl_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'SCL'))
             button_layout.addWidget(scl_trigger_button, row + 1, 1)
@@ -368,6 +472,8 @@ class I2CDisplay(QWidget):
         self.sample_rate_input = QLineEdit()
         self.sample_rate_input.setValidator(QIntValidator(1, 5000000))
         self.sample_rate_input.setText("1000")
+        # Set size policy to Preferred
+        self.sample_rate_input.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         button_layout.addWidget(self.sample_rate_input, next_row, 1)
         self.sample_rate_input.returnPressed.connect(self.handle_sample_rate_input)
 
@@ -378,6 +484,8 @@ class I2CDisplay(QWidget):
         self.num_samples_input = QLineEdit()
         self.num_samples_input.setValidator(QIntValidator(1, 1023))
         self.num_samples_input.setText("300")
+        # Set size policy to Preferred
+        self.num_samples_input.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         button_layout.addWidget(self.num_samples_input, next_row + 1, 1)
         self.num_samples_input.returnPressed.connect(self.send_num_samples_command)
 
@@ -392,6 +500,10 @@ class I2CDisplay(QWidget):
         self.single_button.clicked.connect(self.start_single_capture)
         control_buttons_layout.addWidget(self.single_button)
 
+        self.clear_button = QPushButton("Clear")  # Add Clear button
+        self.clear_button.clicked.connect(self.clear_decoded_text)
+        control_buttons_layout.addWidget(self.clear_button)
+
         button_layout.addLayout(control_buttons_layout, next_row + 2, 0, 1, 2)
 
         # Cursor for measurement
@@ -403,6 +515,20 @@ class I2CDisplay(QWidget):
         self.update_cursor_position()
         self.cursor.sigPositionChanged.connect(self.update_cursor_position)
 
+        # Create a horizontal layout for group boxes
+        groups_layout = QHBoxLayout()
+        main_layout.addLayout(groups_layout)
+
+        # Add text edit widgets for each group
+        for i in range(4):
+            group_box = QGroupBox(f"I2C {i+1}")
+            group_layout = QVBoxLayout()
+            group_box.setLayout(group_layout)
+            text_edit = QTextEdit()
+            text_edit.setReadOnly(True)
+            group_layout.addWidget(text_edit)
+            groups_layout.addWidget(group_box)
+            self.decoded_texts.append(text_edit)
 
     def handle_sample_rate_input(self):
         try:
@@ -546,6 +672,7 @@ class I2CDisplay(QWidget):
         self.channel_visibility[scl_idx] = is_checked
         self.curves[sda_idx].setVisible(is_checked)
         self.curves[scl_idx].setVisible(is_checked)
+        self.i2c_group_enabled[group_idx] = is_checked  # Update the enabled list
 
         button = self.channel_buttons[group_idx]
         if is_checked:
@@ -632,16 +759,80 @@ class I2CDisplay(QWidget):
     def clear_data_buffers(self):
         self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]
 
-    def handle_data(self, data_list):
+    def handle_data_value(self, data_value):
         if self.is_reading:
-            for data_value in data_list:
-                # Store raw data for plotting
-                for i in range(self.channels):
-                    bit = (data_value >> i) & 1
-                    self.data_buffer[i].append(bit)
+            # Store raw data for plotting
+            for i in range(self.channels):
+                bit = (data_value >> i) & 1
+                self.data_buffer[i].append(bit)
             if self.is_single_capture and all(len(buf) >= bufferSize for buf in self.data_buffer):
                 self.stop_single_capture()
 
+    def display_decoded_message(self, decoded_data):
+        group_idx = decoded_data['group_idx']
+        if not self.i2c_group_enabled[group_idx]:
+            return  # Do not display if the group is not enabled
+        message = decoded_data['message']
+        data_format = self.group_configs[group_idx].get('data_format', 'Hexadecimal')
+
+        # Build message string
+        message_str = ""
+        for item in message:
+            if item['type'] == 'Address':
+                addr = item['data']
+                rw_bit = item.get('rw')
+                if data_format == 'Binary':
+                    addr_str = bin(addr)
+                elif data_format == 'Decimal':
+                    addr_str = str(addr)
+                elif data_format == 'Hexadecimal':
+                    addr_str = hex(addr)
+                elif data_format == 'ASCII':
+                    addr_str = chr(addr)
+                else:
+                    addr_str = hex(addr)
+                if rw_bit is not None:
+                    rw_str = 'Read' if rw_bit else 'Write'
+                    message_str += f"Address: {addr_str} ({rw_str})\n"
+                else:
+                    message_str += f"Address: {addr_str}\n"
+            elif item['type'] == 'Data':
+                data_byte = item['data']
+                if data_format == 'Binary':
+                    data_str = bin(data_byte)
+                elif data_format == 'Decimal':
+                    data_str = str(data_byte)
+                elif data_format == 'Hexadecimal':
+                    data_str = hex(data_byte)
+                elif data_format == 'ASCII':
+                    data_str = chr(data_byte)
+                else:
+                    data_str = hex(data_byte)
+                message_str += f"Data: {data_str}\n"
+            elif item['type'] == 'ACK':
+                ack = item['data']
+                ack_str = 'ACK' if ack == 0 else 'NACK'
+                message_str += f"{ack_str}\n"
+
+        message_str += "-" * 20 + "\n"
+
+        # Append the message to the group's messages
+        self.decoded_messages_per_group[group_idx].append(message_str)
+
+        # Update the decoded text box
+        text_edit = self.decoded_texts[group_idx]
+        text_edit.setPlainText("".join(self.decoded_messages_per_group[group_idx]))
+        # Move cursor to the end to ensure it scrolls to the latest message
+        cursor = text_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        text_edit.setTextCursor(cursor)
+        text_edit.ensureCursorVisible()
+
+    def clear_decoded_text(self):
+        # Clear all decoded text boxes and messages per group
+        for idx, text_edit in enumerate(self.decoded_texts):
+            text_edit.clear()
+            self.decoded_messages_per_group[idx] = []
 
     def update_plot(self):
         for i in range(8):
@@ -687,3 +878,6 @@ class I2CDisplay(QWidget):
             self.channel_buttons[group_idx].setText(label)
             # Clear data buffers
             self.clear_data_buffers()
+            # Update worker's group configurations
+            self.worker.group_configs = self.group_configs
+
