@@ -83,8 +83,8 @@ class SerialWorker(QThread):
 
     def decode_i2c(self, data_value):
         for group_idx, group_config in enumerate(self.group_configs):
-            scl_channel = group_config.get('clock_channel', 2) - 1
-            sda_channel = group_config.get('data_channel', 1) - 1
+            scl_channel = group_config['clock_channel'] - 1
+            sda_channel = group_config['data_channel'] - 1
             address_width = group_config.get('address_width', 8)
             data_format = group_config.get('data_format', 'Hexadecimal')
 
@@ -383,6 +383,51 @@ class I2CDisplay(QWidget):
         self.worker.decoded_message_ready.connect(self.display_decoded_message)
         self.worker.start()
 
+class I2CDisplay(QWidget):
+    def __init__(self, port, baudrate, channels=8):
+        super().__init__()
+        self.period = 65454
+        self.num_samples = 0
+        self.port = port
+        self.baudrate = baudrate
+        self.channels = channels
+
+        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]  # 8 channels
+        self.channel_visibility = [False] * self.channels  # Visibility for each channel
+
+        self.is_single_capture = False
+
+        self.current_trigger_modes = ['No Trigger'] * self.channels
+        self.trigger_mode_options = ['No Trigger', 'Rising Edge', 'Falling Edge']
+
+        self.sample_rate = 1000  # Default sample rate in Hz
+
+        # Initialize group configurations with default channels and address width
+        self.group_configs = [
+            {'data_channel': 1, 'clock_channel': 2, 'address_width': 8},
+            {'data_channel': 3, 'clock_channel': 4, 'address_width': 8},
+            {'data_channel': 5, 'clock_channel': 6, 'address_width': 8},
+            {'data_channel': 7, 'clock_channel': 8, 'address_width': 8},
+        ]
+        self.i2c_group_enabled = [False] * 4  # Track which I2C groups are enabled
+
+        # Initialize self.decoded_texts before calling setup_ui()
+        self.decoded_texts = []
+
+        # Initialize decoded messages per group
+        self.decoded_messages_per_group = {i: [] for i in range(4)}
+
+        self.setup_ui()
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_plot)
+
+        self.is_reading = False
+
+        self.worker = SerialWorker(self.port, self.baudrate, channels=self.channels, group_configs=self.group_configs)
+        self.worker.data_ready.connect(self.handle_data_value)
+        self.worker.decoded_message_ready.connect(self.display_decoded_message)
+        self.worker.start()
+
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
 
@@ -422,9 +467,10 @@ class I2CDisplay(QWidget):
 
         for i in range(4):
             row = i * 2  # Increment by 2 for each group
-            sda_channel = 2 * i
-            scl_channel = 2 * i + 1
-            label = f"I2C {i+1}\nCh{sda_channel+1}:SDA\nCh{scl_channel+1}:SCL"
+            group_config = self.group_configs[i]
+            sda_channel = group_config['data_channel']
+            scl_channel = group_config['clock_channel']
+            label = f"I2C {i+1}\nCh{sda_channel}:SDA\nCh{scl_channel}:SCL"
             button = I2CChannelButton(label, group_idx=i)
 
             # Set size policy to Preferred to prevent excessive expansion
@@ -437,20 +483,14 @@ class I2CDisplay(QWidget):
             button_layout.addWidget(button, row, 0, 2, 1)  # Span 2 rows, 1 column
 
             # SDA Trigger Mode Button
-            sda_trigger_button = QPushButton(f"SDA - {self.current_trigger_modes[sda_channel]}")
-
-            # Set size policy to Preferred
+            sda_trigger_button = QPushButton(f"SDA - {self.current_trigger_modes[sda_channel - 1]}")
             sda_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-
             sda_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'SDA'))
             button_layout.addWidget(sda_trigger_button, row, 1)
 
             # SCL Trigger Mode Button
-            scl_trigger_button = QPushButton(f"SCL - {self.current_trigger_modes[scl_channel]}")
-
-            # Set size policy to Preferred
+            scl_trigger_button = QPushButton(f"SCL - {self.current_trigger_modes[scl_channel - 1]}")
             scl_trigger_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-
             scl_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'SCL'))
             button_layout.addWidget(scl_trigger_button, row + 1, 1)
 
