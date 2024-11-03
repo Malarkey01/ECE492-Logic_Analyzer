@@ -34,7 +34,7 @@ uint16_t buttonState = 0;
 #define BUFFER_SIZE 1024
 //#define BUFFER_SIZE 16384 // Default size is 1024
 uint16_t buffer[BUFFER_SIZE];
-int bufferPointer = 0;
+uint16_t bufferPointer = 0;
 uint8_t Buff[10];
 int trigger = 0;
 int Period_T;
@@ -93,6 +93,18 @@ void change_period16(uint16_t period);
   * @brief  The application entry point.
   * @retval int
   */
+
+typedef enum {
+	TenBit = 0x03FF,
+	ElevenBit = 0x07FF,
+	TwelveBit = 0x0FFF,
+	ThirteenBit = 0x1FFF,
+	FourteenBit = 0x3FFF,
+	FifteenBit = 0x7FFF,
+	SixteenBit = 0xFFFF
+} NumBits;
+
+
 int main(void)
 {
   /* USER CODE BEGIN 1 */
@@ -150,9 +162,11 @@ int main(void)
   	  	  		 if(val == BUFFER_SIZE){
   	  	  			 val = 0;
   	  	  		 }
-  	  	  		 if (counter == BUFFER_SIZE\) {
-  	  	  			HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
-  	  	  			state = preTrigger;
+  	  	  		 if (val == bufferPointer) {
+  	  	  			counter = 0;
+  	  	  			memset(buffer, 0, sizeof(buffer));
+					HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
+					state = preTrigger;
   	  	  		 }
   	  	  			break;
 
@@ -355,6 +369,8 @@ uint8_t trigPin = 0x00;
 uint8_t trigEdge = 0x00; //Falling Edge
 int triggerCount = 300;
 int Cutter=0;
+
+// ISR for Timer 16
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 
 	if(htim == &htim16){
@@ -367,45 +383,38 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 
 	}
 
-#define DISCONNECT_THRESHOLD 250  // Number of consecutive identical readings to detect disconnection
+uint8_t IncFlag = 0; // Flag to see if we're on the second value.
 
-uint16_t lastValue = 0;  // Store the last read value
-int stableCount = 0; // Count of consecutive identical readings
-int check = 0;
-
-
+// ISR for Timer 2
 void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim) {
+
+	// Read the current value from the input pin
+	uint16_t currentValue = GPIOB->IDR;
+
     if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
-        if (!trigger) {
-            xorResult = GPIOB->IDR ^ buffer[bufferPointer];
+        if (!trigger && IncFlag) {
+            xorResult = currentValue ^ buffer[bufferPointer];
             uint16_t trigPinCheck = xorResult & trigPin;
             uint16_t trigEdgeCheck = ~(buffer[bufferPointer] ^ trigEdge);
             trigger = (trigPinCheck & trigEdgeCheck) > 0;
             if (trigger) {
-                counter = 0;
+            	IncFlag = 0;
                 state = triggerState;
                 trigPointer = bufferPointer;
-                // Start timer 16
-                HAL_TIM_Base_Start_IT(&htim16);
+                HAL_TIM_Base_Start_IT(&htim16); // Start timer 16
             }
         }
-        // Read the current value from the input pin
-        uint16_t currentValue = GPIOB->IDR & 0xFFFF;
-
-        // Check for a stable signal (potential disconnection)
-
-        // Add 8-bit logic input to the buffer if not disconnected
-        buffer[bufferPointer] = currentValue;
-        // Increment pointer with circular logic
-        bufferPointer++;
-        bufferPointer &= 0x03FF; // Default: 0x3FFF
     }
+
+	// Add 8-bit logic input to the buffer if not disconnected
+	buffer[bufferPointer] = currentValue;
+	// Increment pointer with circular logic
+	bufferPointer++;
+	bufferPointer &= TenBit; // Default: 0x03FF for 10 Bits
+
+	IncFlag = 1; // We got the second value.
+
 }
-
-
-
-
-
 
 
 uint8_t buff[100] ;
@@ -483,6 +492,8 @@ void change_period2(uint32_t period){
 	memset(buffer, 0, sizeof(buffer));
 
 	MX_TIM2_Init(period);
+	HAL_TIM_PWM_Start_IT(&htim2, TIM_CHANNEL_1);
+
 }
 void change_period16(uint16_t period){
 	HAL_TIM_Base_Stop(&htim16);
