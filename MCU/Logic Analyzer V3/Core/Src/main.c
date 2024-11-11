@@ -412,7 +412,7 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim) {
 	bufferPointer++;
 	bufferPointer &= TenBit; // Default: 0x03FF for 10 Bits
 
-	IncFlag = 1; // We got the second value.
+	if(bufferPointer == BUFFER_SIZE-1){IncFlag = 1;}
 
 }
 
