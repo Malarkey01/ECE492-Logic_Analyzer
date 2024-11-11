@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QGroupBox,
 )
-from PyQt6.QtGui import QIcon, QIntValidator, QTextCursor
+from PyQt6.QtGui import QIcon, QIntValidator, QTextCursor, QFont
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 from collections import deque
 from InterfaceCommands import (
@@ -37,7 +37,7 @@ bufferSize = 4096    # Default is 1024
 preTriggerBufferSize = 4000  # Default is 1000
 
 class SerialWorker(QThread):
-    data_ready = pyqtSignal(int)  # For raw data values
+    data_ready = pyqtSignal(int, int)  # For raw data values and sample indices
     decoded_message_ready = pyqtSignal(dict)  # For decoded messages
 
     def __init__(self, port, baudrate, channels=8, group_configs=None):
@@ -56,12 +56,20 @@ class SerialWorker(QThread):
         self.sda_last_values = [1] * len(self.group_configs)
         self.messages = [[] for _ in range(len(self.group_configs))]
         self.error_flags = [False] * len(self.group_configs)
+        self.sample_idx = 0  # Initialize sample index
 
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
             print(f"Failed to open serial port: {str(e)}")
             self.is_running = False
+            
+        # Initialize sample index variables for each group
+        self.addr_sample_idxs = [None] * len(self.group_configs)
+        self.ack_sample_idxs = [None] * len(self.group_configs)
+        self.data_sample_idxs = [None] * len(self.group_configs)
+        self.stop_sample_idxs = [None] * len(self.group_configs)
+
 
     def set_trigger_mode(self, channel_idx, mode):
         self.trigger_modes[channel_idx] = mode
@@ -76,12 +84,13 @@ class SerialWorker(QThread):
                     try:
                         data_value = int(line.strip())
                         data_buffer.append(data_value)
-                        self.data_ready.emit(data_value)  # Emit data_value for plotting
-                        self.decode_i2c(data_value)
+                        self.data_ready.emit(data_value, self.sample_idx)  # Emit data_value and sample_idx
+                        self.decode_i2c(data_value, self.sample_idx)
+                        self.sample_idx += 1  # Increment sample index
                     except ValueError:
                         continue
 
-    def decode_i2c(self, data_value):
+    def decode_i2c(self, data_value, sample_idx):
         for group_idx, group_config in enumerate(self.group_configs):
             scl_channel = group_config['clock_channel'] - 1
             sda_channel = group_config['data_channel'] - 1
@@ -105,6 +114,12 @@ class SerialWorker(QThread):
             message = self.messages[group_idx]
             error_flag = self.error_flags[group_idx]
 
+            # Retrieve stored sample indices
+            addr_sample_idx = self.addr_sample_idxs[group_idx]
+            ack_sample_idx = self.ack_sample_idxs[group_idx]
+            data_sample_idx = self.data_sample_idxs[group_idx]
+            stop_sample_idx = self.stop_sample_idxs[group_idx]
+
             # Determine the expected number of bits for the address
             if address_width == 7:
                 expected_bits = address_width + 1  # Include R/W bit
@@ -119,8 +134,20 @@ class SerialWorker(QThread):
                     bit_count = 0
                     message = []
                     error_flag = False
+                    # Record the sample index for START
+                    start_sample_idx = sample_idx
+                    # Emit start condition immediately
+                    self.decoded_message_ready.emit({
+                        'group_idx': group_idx,
+                        'event': 'START',
+                        'sample_idx': start_sample_idx,
+                    })
             elif state == 'START':
                 if scl_edge and scl == 1:
+                    if bit_count == 0:
+                        # Record sample index at the start of address transmission
+                        addr_sample_idx = sample_idx
+                        self.addr_sample_idxs[group_idx] = addr_sample_idx
                     # Rising edge of SCL, sample SDA
                     current_byte = (current_byte << 1) | sda
                     bit_count += 1
@@ -132,40 +159,90 @@ class SerialWorker(QThread):
                             message.append({'type': 'Address', 'data': address, 'rw': rw_bit})
                         else:
                             address = current_byte
+                            rw_bit = None
                             message.append({'type': 'Address', 'data': address})
+                        # Emit signal for address
+                        self.decoded_message_ready.emit({
+                            'group_idx': group_idx,
+                            'event': 'ADDRESS',
+                            'data': address,
+                            'rw_bit': rw_bit,
+                            'sample_idx': addr_sample_idx,  # Use recorded sample index
+                        })
                         bit_count = 0
                         current_byte = 0
                         state = 'ACK'
+                        # Reset address sample index
+                        self.addr_sample_idxs[group_idx] = None
             elif state == 'ACK':
                 if scl_edge and scl == 1:
+                    # Record sample index at the start of ACK bit
+                    ack_sample_idx = sample_idx
+                    self.ack_sample_idxs[group_idx] = ack_sample_idx
                     # Sample ACK bit
                     ack = sda
                     message.append({'type': 'ACK', 'data': ack})
+                    # Emit signal for ACK
+                    self.decoded_message_ready.emit({
+                        'group_idx': group_idx,
+                        'event': 'ACK',
+                        'data': ack,
+                        'sample_idx': ack_sample_idx,
+                    })
                     state = 'DATA'
+                    # Reset ACK sample index
+                    self.ack_sample_idxs[group_idx] = None
             elif state == 'DATA':
                 if scl_edge and scl == 1:
+                    if bit_count == 0:
+                        # Record sample index at the start of data byte
+                        data_sample_idx = sample_idx
+                        self.data_sample_idxs[group_idx] = data_sample_idx
                     # Rising edge of SCL, sample SDA
                     current_byte = (current_byte << 1) | sda
                     bit_count += 1
                     if bit_count == 8:
                         # Data byte received
                         message.append({'type': 'Data', 'data': current_byte})
+                        # Emit signal for DATA
+                        self.decoded_message_ready.emit({
+                            'group_idx': group_idx,
+                            'event': 'DATA',
+                            'data': current_byte,
+                            'sample_idx': data_sample_idx,  # Use recorded sample index
+                        })
                         bit_count = 0
                         current_byte = 0
                         state = 'ACK2'
+                        # Reset data sample index
+                        self.data_sample_idxs[group_idx] = None
             elif state == 'ACK2':
                 if scl_edge and scl == 1:
+                    # Record sample index at the start of ACK bit
+                    ack_sample_idx = sample_idx
+                    self.ack_sample_idxs[group_idx] = ack_sample_idx
                     # Sample ACK bit
                     ack = sda
                     message.append({'type': 'ACK', 'data': ack})
+                    # Emit signal for ACK
+                    self.decoded_message_ready.emit({
+                        'group_idx': group_idx,
+                        'event': 'ACK',
+                        'data': ack,
+                        'sample_idx': ack_sample_idx,
+                    })
                     state = 'DATA'
+                    # Reset ACK sample index
+                    self.ack_sample_idxs[group_idx] = None
             if sda_edge and sda == 1 and scl == 1:
                 # Stop condition detected
+                stop_sample_idx = sample_idx  # Record sample index for STOP
                 # Emit the decoded message
                 self.decoded_message_ready.emit({
                     'group_idx': group_idx,
-                    'message': message,
-                    'error': error_flag,
+                    'event': 'STOP',
+                    'message': message.copy(),
+                    'sample_idx': stop_sample_idx,
                 })
                 # Reset state
                 state = 'IDLE'
@@ -173,6 +250,11 @@ class SerialWorker(QThread):
                 bit_count = 0
                 message = []
                 error_flag = False
+                # Reset sample indices
+                self.addr_sample_idxs[group_idx] = None
+                self.ack_sample_idxs[group_idx] = None
+                self.data_sample_idxs[group_idx] = None
+                self.stop_sample_idxs[group_idx] = None
 
             # Update the stored states
             self.states[group_idx] = state
@@ -184,6 +266,19 @@ class SerialWorker(QThread):
             # Update last values
             self.scl_last_values[group_idx] = scl
             self.sda_last_values[group_idx] = sda
+            
+    def reset_decoding_states(self):
+        # Reset I2C decoding variables for each group
+        self.states = ['IDLE'] * len(self.group_configs)
+        self.bit_buffers = [[] for _ in range(len(self.group_configs))]
+        self.current_bytes = [0] * len(self.group_configs)
+        self.bit_counts = [0] * len(self.group_configs)
+        self.decoded_messages = [[] for _ in range(len(self.group_configs))]
+        self.scl_last_values = [1] * len(self.group_configs)
+        self.sda_last_values = [1] * len(self.group_configs)
+        self.messages = [[] for _ in range(len(self.group_configs))]
+        self.error_flags = [False] * len(self.group_configs)
+        self.sample_idx = 0  # Reset sample index
 
     def stop_worker(self):
         self.is_running = False
@@ -356,7 +451,9 @@ class I2CDisplay(QWidget):
         self.channels = channels
 
         self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]  # 8 channels
-
+        self.sample_indices = deque(maxlen=bufferSize)
+        self.total_samples = 0
+        
         self.is_single_capture = False
 
         self.current_trigger_modes = ['No Trigger'] * self.channels
@@ -387,6 +484,8 @@ class I2CDisplay(QWidget):
 
         # Initialize decoded messages per group
         self.decoded_messages_per_group = {i: [] for i in range(4)}
+
+        self.group_cursors = [[] for _ in range(4)]  # To store cursors per group
 
         self.setup_ui()
         self.timer = QTimer()
@@ -419,8 +518,9 @@ class I2CDisplay(QWidget):
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
-        self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
+        self.plot.setXRange(0, bufferSize / self.sample_rate, padding=0)
         self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
+        self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)  # 8 channels
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
@@ -530,14 +630,14 @@ class I2CDisplay(QWidget):
 
         button_layout.addLayout(control_buttons_layout, next_row + 2, 0, 1, 2)
 
-        # Cursor for measurement
-        self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
-        self.plot.addItem(self.cursor)
+        # Remove existing cursor functionality
+        # self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True, pen=pg.mkPen(color='y', width=2))
+        # self.plot.addItem(self.cursor)
 
-        self.cursor_label = pg.TextItem(anchor=(0, 1), color='y')
-        self.plot.addItem(self.cursor_label)
-        self.update_cursor_position()
-        self.cursor.sigPositionChanged.connect(self.update_cursor_position)
+        # self.cursor_label = pg.TextItem(anchor=(0, 1), color='y')
+        # self.plot.addItem(self.cursor_label)
+        # self.update_cursor_position()
+        # self.cursor.sigPositionChanged.connect(self.update_cursor_position)
 
         # Create a horizontal layout for group boxes
         groups_layout = QHBoxLayout()
@@ -553,7 +653,7 @@ class I2CDisplay(QWidget):
             group_layout.addWidget(text_edit)
             groups_layout.addWidget(group_box)
             self.decoded_texts.append(text_edit)
-                      
+                          
     def reset_group_to_default(self, group_idx):
         # Reset the group configuration to default settings
         default_config = self.default_group_configs[group_idx].copy()
@@ -825,6 +925,18 @@ class I2CDisplay(QWidget):
 
     def clear_data_buffers(self):
         self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]
+        self.total_samples = 0  # Reset total samples
+
+        # Remove all cursors
+        for group_idx in range(4):
+            for cursor_info in self.group_cursors[group_idx]:
+                self.plot.removeItem(cursor_info['line'])
+                self.plot.removeItem(cursor_info['label'])
+            self.group_cursors[group_idx] = []
+
+        # Reset worker's decoding states
+        self.worker.reset_decoding_states()
+
 
     def handle_data_value(self, data_value):
         if self.is_reading:
@@ -832,89 +944,176 @@ class I2CDisplay(QWidget):
             for i in range(self.channels):
                 bit = (data_value >> i) & 1
                 self.data_buffer[i].append(bit)
-            if self.is_single_capture and all(len(buf) >= bufferSize for buf in self.data_buffer):
-                self.stop_single_capture()
+            self.total_samples += 1  # Increment total samples
+
+            # Check if buffers are full
+            if all(len(buf) >= bufferSize for buf in self.data_buffer):
+                if self.is_single_capture:
+                    # In single capture mode, stop acquisition
+                    self.stop_single_capture()
+                else:
+                    # In continuous mode, reset buffers and cursors
+                    self.clear_data_buffers()
+                    self.clear_decoded_text()
 
     def display_decoded_message(self, decoded_data):
         group_idx = decoded_data['group_idx']
         if not self.i2c_group_enabled[group_idx]:
             return  # Do not display if the group is not enabled
-        message = decoded_data['message']
         data_format = self.group_configs[group_idx].get('data_format', 'Hexadecimal')
+        event = decoded_data.get('event', None)
+        sample_idx = decoded_data.get('sample_idx', None)
 
-        # Build message string
-        message_str = ""
-        for item in message:
-            if item['type'] == 'Address':
-                addr = item['data']
-                rw_bit = item.get('rw')
-                if data_format == 'Binary':
-                    addr_str = bin(addr)
-                elif data_format == 'Decimal':
-                    addr_str = str(addr)
-                elif data_format == 'Hexadecimal':
-                    addr_str = hex(addr)
-                elif data_format == 'ASCII':
-                    addr_str = chr(addr)
-                else:
-                    addr_str = hex(addr)
-                if rw_bit is not None:
-                    rw_str = 'Read' if rw_bit else 'Write'
-                    message_str += f"Address: {addr_str} ({rw_str})\n"
-                else:
-                    message_str += f"Address: {addr_str}\n"
-            elif item['type'] == 'Data':
-                data_byte = item['data']
-                if data_format == 'Binary':
-                    data_str = bin(data_byte)
-                elif data_format == 'Decimal':
-                    data_str = str(data_byte)
-                elif data_format == 'Hexadecimal':
-                    data_str = hex(data_byte)
-                elif data_format == 'ASCII':
-                    data_str = chr(data_byte)
-                else:
-                    data_str = hex(data_byte)
-                message_str += f"Data: {data_str}\n"
-            elif item['type'] == 'ACK':
-                ack = item['data']
-                ack_str = 'ACK' if ack == 0 else 'NACK'
-                message_str += f"{ack_str}\n"
+        if event == 'START' and sample_idx is not None:
+            # Create cursor for START condition
+            self.create_cursor(group_idx, sample_idx, 'Start')
+        elif event == 'ADDRESS':
+            # Create cursor for Address
+            address = decoded_data['data']
+            rw_bit = decoded_data.get('rw_bit', None)
+            if data_format == 'Binary':
+                addr_str = bin(address)
+            elif data_format == 'Decimal':
+                addr_str = str(address)
+            elif data_format == 'Hexadecimal':
+                addr_str = hex(address)
+            elif data_format == 'ASCII':
+                addr_str = chr(address)
+            else:
+                addr_str = hex(address)
+            if rw_bit is not None:
+                rw_str = 'R' if rw_bit else 'W'
+                label_text = f"A:{addr_str} ({rw_str})"
+            else:
+                label_text = f"A:{addr_str}"
+            self.create_cursor(group_idx, sample_idx, label_text)
+        elif event == 'ACK':
+            # Create cursor for ACK/NACK
+            ack = decoded_data['data']
+            ack_str = 'ACK' if ack == 0 else 'NACK'
+            self.create_cursor(group_idx, sample_idx, ack_str)
+        elif event == 'DATA':
+            # Create cursor for Data byte
+            data_byte = decoded_data['data']
+            if data_format == 'Binary':
+                data_str = bin(data_byte)
+            elif data_format == 'Decimal':
+                data_str = str(data_byte)
+            elif data_format == 'Hexadecimal':
+                data_str = hex(data_byte)
+            elif data_format == 'ASCII':
+                data_str = chr(data_byte)
+            else:
+                data_str = hex(data_byte)
+            label_text = f"D:{data_str}"
+            self.create_cursor(group_idx, sample_idx, label_text)
+        elif event == 'STOP':
+            # Create cursor for STOP condition
+            self.create_cursor(group_idx, sample_idx, 'Stop')
 
-        message_str += "-" * 20 + "\n"
+            # Build message string
+            message = decoded_data['message']
+            message_str = ""
+            for item in message:
+                if item['type'] == 'Address':
+                    addr = item['data']
+                    rw_bit = item.get('rw')
+                    if data_format == 'Binary':
+                        addr_str = bin(addr)
+                    elif data_format == 'Decimal':
+                        addr_str = str(addr)
+                    elif data_format == 'Hexadecimal':
+                        addr_str = hex(addr)
+                    elif data_format == 'ASCII':
+                        addr_str = chr(addr)
+                    else:
+                        addr_str = hex(addr)
+                    if rw_bit is not None:
+                        rw_str = 'Read' if rw_bit else 'Write'
+                        message_str += f"Address: {addr_str} ({rw_str})\n"
+                    else:
+                        message_str += f"Address: {addr_str}\n"
+                elif item['type'] == 'Data':
+                    data_byte = item['data']
+                    if data_format == 'Binary':
+                        data_str = bin(data_byte)
+                    elif data_format == 'Decimal':
+                        data_str = str(data_byte)
+                    elif data_format == 'Hexadecimal':
+                        data_str = hex(data_byte)
+                    elif data_format == 'ASCII':
+                        data_str = chr(data_byte)
+                    else:
+                        data_str = hex(data_byte)
+                    message_str += f"Data: {data_str}\n"
+                elif item['type'] == 'ACK':
+                    ack = item['data']
+                    ack_str = 'ACK' if ack == 0 else 'NACK'
+                    message_str += f"{ack_str}\n"
 
-        # Append the message to the group's messages
-        self.decoded_messages_per_group[group_idx].append(message_str)
+            message_str += "-" * 20 + "\n"
 
-        # Update the decoded text box
-        text_edit = self.decoded_texts[group_idx]
-        text_edit.setPlainText("".join(self.decoded_messages_per_group[group_idx]))
-        # Move cursor to the end to ensure it scrolls to the latest message
-        cursor = text_edit.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        text_edit.setTextCursor(cursor)
-        text_edit.ensureCursorVisible()
+            # Append the message to the group's messages
+            self.decoded_messages_per_group[group_idx].append(message_str)
+
+            # Update the decoded text box
+            text_edit = self.decoded_texts[group_idx]
+            text_edit.setPlainText("".join(self.decoded_messages_per_group[group_idx]))
+            # Move cursor to the end to ensure it scrolls to the latest message
+            cursor = text_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            text_edit.setTextCursor(cursor)
+            text_edit.ensureCursorVisible()
+
+    def create_cursor(self, group_idx, sample_idx, label_text):
+        # Get base level for this group
+        base_level = (4 - group_idx - 1) * 4  # Adjust as needed
+        # Cursor color (keeping your tweaks)
+        cursor_color = '#00F5FF'  # Use your preferred color
+        # Create a vertical line segment between SDA and SCL levels
+        y1 = base_level + 1
+        y2 = base_level + 2
+        x = 0  # Initial x position, will be updated in update_plot
+        # Create line data
+        line = pg.PlotDataItem([x, x], [y1, y2], pen=pg.mkPen(color=cursor_color, width=2))
+        self.plot.addItem(line)
+        # Add a label
+        label = pg.TextItem(text=label_text, anchor=(0.1, 0.5), color=cursor_color)
+        font = QFont("Arial", 12)
+        label.setFont(font)
+        self.plot.addItem(label)
+        # Store the line, label, and sample index
+        self.group_cursors[group_idx].append({
+            'line': line,
+            'label': label,
+            'sample_idx': sample_idx,
+            'base_level': base_level,
+            'y1': y1,
+            'y2': y2
+        })
+
 
     def clear_decoded_text(self):
         # Clear all decoded text boxes and messages per group
         for idx, text_edit in enumerate(self.decoded_texts):
             text_edit.clear()
             self.decoded_messages_per_group[idx] = []
+        # Cursors are already cleared in clear_data_buffers
 
     def update_plot(self):
         for group_idx, is_enabled in enumerate(self.i2c_group_enabled):
             if is_enabled:
                 group_config = self.group_configs[group_idx]
-                sda_channel = group_config['data_channel'] - 1  # Adjusting index
-                scl_channel = group_config['clock_channel'] - 1  # Adjusting index
+                sda_channel = group_config['data_channel'] - 1  # Adjust index
+                scl_channel = group_config['clock_channel'] - 1  # Adjust index
 
                 # Get the curves for this group
                 sda_curve = self.group_curves[group_idx]['sda_curve']
                 scl_curve = self.group_curves[group_idx]['scl_curve']
 
                 # Prepare data for plotting
-                sda_data = self.data_buffer[sda_channel]
-                scl_data = self.data_buffer[scl_channel]
+                sda_data = list(self.data_buffer[sda_channel])
+                scl_data = list(self.data_buffer[scl_channel])
 
                 num_samples = len(sda_data)
                 if num_samples > 1:
@@ -923,7 +1122,7 @@ class I2CDisplay(QWidget):
                     # Offset per group to separate the signals vertically
                     base_level = (4 - group_idx - 1) * 4  # Adjust as needed
 
-                    # For SDA
+                    # --- Plot SDA Signal ---
                     sda_square_wave_time = []
                     sda_square_wave_data = []
                     for j in range(1, num_samples):
@@ -936,7 +1135,7 @@ class I2CDisplay(QWidget):
                             sda_square_wave_data.append(level)
                     sda_curve.setData(sda_square_wave_time, sda_square_wave_data)
 
-                    # For SCL
+                    # --- Plot SCL Signal ---
                     scl_square_wave_time = []
                     scl_square_wave_data = []
                     for j in range(1, num_samples):
@@ -948,7 +1147,60 @@ class I2CDisplay(QWidget):
                             level = scl_data[j] + base_level + 2
                             scl_square_wave_data.append(level)
                     scl_curve.setData(scl_square_wave_time, scl_square_wave_data)
+
+                    # --- Update Cursors ---
+                    cursors_to_remove = []
+                    for cursor_info in self.group_cursors[group_idx]:
+                        sample_idx = cursor_info['sample_idx']
+                        idx_in_buffer = sample_idx - (self.total_samples - num_samples)
+                        if 0 <= idx_in_buffer < num_samples:
+                            cursor_time = t[int(idx_in_buffer)]
+                            # Update the line position
+                            x = cursor_time
+                            y1 = cursor_info['y1']
+                            y2 = cursor_info['y2']
+                            cursor_info['line'].setData([x, x], [y1, y2])
+                            # Update the label position
+                            label_offset = (t[1] - t[0]) * 5  # Adjust label offset as needed
+                            cursor_info['label'].setPos(x + label_offset, (y1 + y2) / 2)
+                            cursor_info['x_pos'] = x + label_offset  # Store x position for overlap checking
+                        else:
+                            # Cursor is no longer in the buffer, remove it
+                            self.plot.removeItem(cursor_info['line'])
+                            self.plot.removeItem(cursor_info['label'])
+                            cursors_to_remove.append(cursor_info)
+                    # Remove cursors that are no longer in buffer
+                    for cursor_info in cursors_to_remove:
+                        self.group_cursors[group_idx].remove(cursor_info)
+
+                    # --- Hide Overlapping Labels ---
+                    # Collect labels and their x positions
+                    labels_with_positions = []
+                    for cursor_info in self.group_cursors[group_idx]:
+                        label = cursor_info['label']
+                        x_pos = cursor_info.get('x_pos', None)
+                        if x_pos is not None:
+                            labels_with_positions.append((x_pos, label))
+
+                    # Sort labels by x position
+                    labels_with_positions.sort(key=lambda item: item[0])
+
+                    # Hide labels that overlap
+                    min_label_spacing = (t[1] - t[0]) * 10  # Adjust as needed
+                    last_label_x = None
+                    for x_pos, label in labels_with_positions:
+                        if last_label_x is None:
+                            label.setVisible(True)
+                            last_label_x = x_pos
+                        else:
+                            if x_pos - last_label_x < min_label_spacing:
+                                # Labels are too close, hide this label
+                                label.setVisible(False)
+                            else:
+                                label.setVisible(True)
+                                last_label_x = x_pos
                 else:
+                    # Clear the curves if no data
                     sda_curve.setData([], [])
                     scl_curve.setData([], [])
             else:
@@ -956,10 +1208,6 @@ class I2CDisplay(QWidget):
                 self.group_curves[group_idx]['sda_curve'].setVisible(False)
                 self.group_curves[group_idx]['scl_curve'].setVisible(False)
 
-    def update_cursor_position(self):
-        cursor_pos = self.cursor.pos().x()
-        self.cursor_label.setText(f"Cursor: {cursor_pos:.6f} s")
-        self.cursor_label.setPos(cursor_pos, 8 * 2 - 1)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
@@ -992,4 +1240,3 @@ class I2CDisplay(QWidget):
             self.clear_data_buffers()
             # Update worker's group configurations
             self.worker.group_configs = self.group_configs
-
