@@ -33,8 +33,8 @@ from InterfaceCommands import (
 )
 from aesthetic import get_icon
 
-bufferSize = 1024    # Default is 1024
-preTriggerBufferSize = 1000  # Default is 1000
+bufferSize = 4096    # Default is 1024
+preTriggerBufferSize = 4000  # Default is 1000
 
 class SerialWorker(QThread):
     data_ready = pyqtSignal(int)  # For raw data values
@@ -243,6 +243,7 @@ class EditableButton(QPushButton):
 
 class I2CChannelButton(EditableButton):
     configure_requested = pyqtSignal(int)  # Signal to notify when configure is requested
+    reset_requested = pyqtSignal(int)      # New signal for reset
 
     def __init__(self, label, group_idx, parent=None):
         super().__init__(label, parent)
@@ -262,6 +263,7 @@ class I2CChannelButton(EditableButton):
                 self.setText(new_label)
         elif action == reset_action:
             self.setText(self.default_label)
+            self.reset_requested.emit(self.group_idx)  # Emit reset signal
         elif action == configure_action:
             self.configure_requested.emit(self.group_idx)  # Emit signal to open configuration dialog
 
@@ -354,46 +356,6 @@ class I2CDisplay(QWidget):
         self.channels = channels
 
         self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]  # 8 channels
-        self.channel_visibility = [False] * self.channels  # Visibility for each channel
-
-        self.is_single_capture = False
-
-        self.current_trigger_modes = ['No Trigger'] * self.channels
-        self.trigger_mode_options = ['No Trigger', 'Rising Edge', 'Falling Edge']
-
-        self.sample_rate = 1000  # Default sample rate in Hz
-
-        self.group_configs = [{'address_width': 8} for _ in range(4)]  # Store configurations for each group
-        self.i2c_group_enabled = [False] * 4  # Track which I2C groups are enabled
-
-        # Initialize self.decoded_texts before calling setup_ui()
-        self.decoded_texts = []
-
-        # Initialize decoded messages per group
-        self.decoded_messages_per_group = {i: [] for i in range(4)}
-
-        self.setup_ui()
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_plot)
-
-        self.is_reading = False
-
-        self.worker = SerialWorker(self.port, self.baudrate, channels=self.channels, group_configs=self.group_configs)
-        self.worker.data_ready.connect(self.handle_data_value)
-        self.worker.decoded_message_ready.connect(self.display_decoded_message)
-        self.worker.start()
-
-class I2CDisplay(QWidget):
-    def __init__(self, port, baudrate, channels=8):
-        super().__init__()
-        self.period = 65454
-        self.num_samples = 0
-        self.port = port
-        self.baudrate = baudrate
-        self.channels = channels
-
-        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]  # 8 channels
-        self.channel_visibility = [False] * self.channels  # Visibility for each channel
 
         self.is_single_capture = False
 
@@ -409,6 +371,15 @@ class I2CDisplay(QWidget):
             {'data_channel': 5, 'clock_channel': 6, 'address_width': 8},
             {'data_channel': 7, 'clock_channel': 8, 'address_width': 8},
         ]
+        
+        # Default group configurations
+        self.default_group_configs = [
+            {'data_channel': 1, 'clock_channel': 2, 'address_width': 8, 'data_format': 'Hexadecimal'},
+            {'data_channel': 3, 'clock_channel': 4, 'address_width': 8, 'data_format': 'Hexadecimal'},
+            {'data_channel': 5, 'clock_channel': 6, 'address_width': 8, 'data_format': 'Hexadecimal'},
+            {'data_channel': 7, 'clock_channel': 8, 'address_width': 8, 'data_format': 'Hexadecimal'},
+        ]
+        
         self.i2c_group_enabled = [False] * 4  # Track which I2C groups are enabled
 
         # Initialize self.decoded_texts before calling setup_ui()
@@ -427,6 +398,15 @@ class I2CDisplay(QWidget):
         self.worker.data_ready.connect(self.handle_data_value)
         self.worker.decoded_message_ready.connect(self.display_decoded_message)
         self.worker.start()
+        
+        self.group_curves = []
+        for group_idx in range(4):  # Assuming 4 groups
+            # Create curves for SDA and SCL for each group
+            sda_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=4))
+            scl_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=4))
+            sda_curve.setVisible(False)
+            scl_curve.setVisible(False)
+            self.group_curves.append({'sda_curve': sda_curve, 'scl_curve': scl_curve})
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -451,12 +431,14 @@ class I2CDisplay(QWidget):
         self.plot.setLabel('bottom', 'Time', units='s')
 
         self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
-        self.curves = []
-        for i in range(self.channels):  # 8 channels
-            color = self.colors[i % len(self.colors)]
-            curve = self.plot.plot(pen=pg.mkPen(color=color, width=4))
-            curve.setVisible(self.channel_visibility[i])
-            self.curves.append(curve)
+        self.group_curves = []
+        for group_idx in range(4):  # Assuming 4 groups
+            # Create curves for SDA and SCL for each group
+            sda_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=4))
+            scl_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=4))
+            sda_curve.setVisible(False)
+            scl_curve.setVisible(False)
+            self.group_curves.append({'sda_curve': sda_curve, 'scl_curve': scl_curve})
 
         button_layout = QGridLayout()
         plot_layout.addLayout(button_layout, stretch=1)  # Allocate less space to the control panel
@@ -501,6 +483,8 @@ class I2CDisplay(QWidget):
             self.channel_buttons.append(button)
             self.sda_trigger_mode_buttons.append(sda_trigger_button)
             self.scl_trigger_mode_buttons.append(scl_trigger_button)
+            
+            button.reset_requested.connect(self.reset_group_to_default)
 
         # Calculate the starting row for the next set of widgets
         next_row = 4 * 2  # 4 groups * 2 rows per group
@@ -569,6 +553,47 @@ class I2CDisplay(QWidget):
             group_layout.addWidget(text_edit)
             groups_layout.addWidget(group_box)
             self.decoded_texts.append(text_edit)
+                      
+    def reset_group_to_default(self, group_idx):
+        # Reset the group configuration to default settings
+        default_config = self.default_group_configs[group_idx].copy()
+        self.group_configs[group_idx] = default_config
+        print(f"Group {group_idx+1} reset to default configuration: {default_config}")
+
+        # Reset the button's label to default
+        self.channel_buttons[group_idx].setText(self.channel_buttons[group_idx].default_label)
+
+        # Update trigger mode buttons
+        sda_channel = default_config['data_channel']
+        scl_channel = default_config['clock_channel']
+        sda_idx = sda_channel - 1
+        scl_idx = scl_channel - 1
+
+        self.current_trigger_modes[sda_idx] = 'No Trigger'
+        self.current_trigger_modes[scl_idx] = 'No Trigger'
+        self.sda_trigger_mode_buttons[group_idx].setText(f"SDA - {self.current_trigger_modes[sda_idx]}")
+        self.scl_trigger_mode_buttons[group_idx].setText(f"SCL - {self.current_trigger_modes[scl_idx]}")
+
+        # Update worker's group configurations
+        self.worker.group_configs[group_idx] = default_config
+
+        # Update curves visibility and colors
+        is_checked = self.i2c_group_enabled[group_idx]
+        sda_curve = self.group_curves[group_idx]['sda_curve']
+        scl_curve = self.group_curves[group_idx]['scl_curve']
+        sda_curve.setVisible(is_checked)
+        scl_curve.setVisible(is_checked)
+        sda_curve.setPen(pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=4))
+        scl_curve.setPen(pg.mkPen(color='#DEDEDE', width=4))
+
+        # Clear data buffers
+        self.clear_data_buffers()
+
+        # Reset button style to default
+        self.channel_buttons[group_idx].setStyleSheet("")
+
+        print(f"Group {group_idx+1} has been reset to default settings.")
+
 
     def handle_sample_rate_input(self):
         try:
@@ -678,11 +703,12 @@ class I2CDisplay(QWidget):
             print(f"Failed to update trigger timer: {e}")
 
     def toggle_trigger_mode(self, group_idx, line):
+        group_config = self.group_configs[group_idx]
         if line == 'SDA':
-            channel_idx = 2 * group_idx
+            channel_idx = group_config['data_channel'] - 1  # Adjust index
             button = self.sda_trigger_mode_buttons[group_idx]
         elif line == 'SCL':
-            channel_idx = 2 * group_idx + 1
+            channel_idx = group_config['clock_channel'] - 1  # Adjust index
             button = self.scl_trigger_mode_buttons[group_idx]
         else:
             return
@@ -704,15 +730,15 @@ class I2CDisplay(QWidget):
         r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
         luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
         return luminance > 0.5
-
+    
     def toggle_channel_group(self, group_idx, is_checked):
-        sda_idx = 2 * group_idx
-        scl_idx = 2 * group_idx + 1
-        self.channel_visibility[sda_idx] = is_checked
-        self.channel_visibility[scl_idx] = is_checked
-        self.curves[sda_idx].setVisible(is_checked)
-        self.curves[scl_idx].setVisible(is_checked)
         self.i2c_group_enabled[group_idx] = is_checked  # Update the enabled list
+
+        # Update curves visibility
+        sda_curve = self.group_curves[group_idx]['sda_curve']
+        scl_curve = self.group_curves[group_idx]['scl_curve']
+        sda_curve.setVisible(is_checked)
+        scl_curve.setVisible(is_checked)
 
         button = self.channel_buttons[group_idx]
         if is_checked:
@@ -723,6 +749,7 @@ class I2CDisplay(QWidget):
                                  f"text-align: left; }}")
         else:
             button.setStyleSheet("")
+
 
     def toggle_reading(self):
         if self.is_reading:
@@ -875,23 +902,59 @@ class I2CDisplay(QWidget):
             self.decoded_messages_per_group[idx] = []
 
     def update_plot(self):
-        for i in range(8):
-            if self.channel_visibility[i]:
-                inverted_index = 8 - i - 1
-                num_samples = len(self.data_buffer[i])
+        for group_idx, is_enabled in enumerate(self.i2c_group_enabled):
+            if is_enabled:
+                group_config = self.group_configs[group_idx]
+                sda_channel = group_config['data_channel'] - 1  # Adjusting index
+                scl_channel = group_config['clock_channel'] - 1  # Adjusting index
+
+                # Get the curves for this group
+                sda_curve = self.group_curves[group_idx]['sda_curve']
+                scl_curve = self.group_curves[group_idx]['scl_curve']
+
+                # Prepare data for plotting
+                sda_data = self.data_buffer[sda_channel]
+                scl_data = self.data_buffer[scl_channel]
+
+                num_samples = len(sda_data)
                 if num_samples > 1:
                     t = np.arange(num_samples) / self.sample_rate
-                    square_wave_time = []
-                    square_wave_data = []
+
+                    # Offset per group to separate the signals vertically
+                    base_level = (4 - group_idx - 1) * 4  # Adjust as needed
+
+                    # For SDA
+                    sda_square_wave_time = []
+                    sda_square_wave_data = []
                     for j in range(1, num_samples):
-                        square_wave_time.extend([t[j - 1], t[j]])
-                        level = self.data_buffer[i][j - 1] + inverted_index * 2
-                        square_wave_data.extend([level, level])
-                        if self.data_buffer[i][j] != self.data_buffer[i][j - 1]:
-                            square_wave_time.append(t[j])
-                            level = self.data_buffer[i][j] + inverted_index * 2
-                            square_wave_data.append(level)
-                    self.curves[i].setData(square_wave_time, square_wave_data)
+                        sda_square_wave_time.extend([t[j - 1], t[j]])
+                        level = sda_data[j - 1] + base_level
+                        sda_square_wave_data.extend([level, level])
+                        if sda_data[j] != sda_data[j - 1]:
+                            sda_square_wave_time.append(t[j])
+                            level = sda_data[j] + base_level
+                            sda_square_wave_data.append(level)
+                    sda_curve.setData(sda_square_wave_time, sda_square_wave_data)
+
+                    # For SCL
+                    scl_square_wave_time = []
+                    scl_square_wave_data = []
+                    for j in range(1, num_samples):
+                        scl_square_wave_time.extend([t[j - 1], t[j]])
+                        level = scl_data[j - 1] + base_level + 2  # Offset by 2 to separate from SDA
+                        scl_square_wave_data.extend([level, level])
+                        if scl_data[j] != scl_data[j - 1]:
+                            scl_square_wave_time.append(t[j])
+                            level = scl_data[j] + base_level + 2
+                            scl_square_wave_data.append(level)
+                    scl_curve.setData(scl_square_wave_time, scl_square_wave_data)
+                else:
+                    sda_curve.setData([], [])
+                    scl_curve.setData([], [])
+            else:
+                # If group is not enabled, hide curves
+                self.group_curves[group_idx]['sda_curve'].setVisible(False)
+                self.group_curves[group_idx]['scl_curve'].setVisible(False)
 
     def update_cursor_position(self):
         cursor_pos = self.cursor.pos().x()
@@ -916,6 +979,15 @@ class I2CDisplay(QWidget):
             scl_channel = new_config['clock_channel']
             label = f"I2C {group_idx+1}\nCh{sda_channel}:SDA\nCh{scl_channel}:SCL"
             self.channel_buttons[group_idx].setText(label)
+            # Update trigger mode buttons
+            self.sda_trigger_mode_buttons[group_idx].setText(f"SDA - {self.current_trigger_modes[sda_channel - 1]}")
+            self.scl_trigger_mode_buttons[group_idx].setText(f"SCL - {self.current_trigger_modes[scl_channel - 1]}")
+            # Update curves visibility
+            is_checked = self.i2c_group_enabled[group_idx]
+            sda_curve = self.group_curves[group_idx]['sda_curve']
+            scl_curve = self.group_curves[group_idx]['scl_curve']
+            sda_curve.setVisible(is_checked)
+            scl_curve.setVisible(is_checked)
             # Clear data buffers
             self.clear_data_buffers()
             # Update worker's group configurations
