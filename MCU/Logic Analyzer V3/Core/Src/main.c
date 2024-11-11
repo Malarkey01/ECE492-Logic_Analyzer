@@ -20,6 +20,7 @@
 #include "main.h"
 #include "usb_device.h"
 #include "usbd_cdc_if.h"
+#include "stm32f3xx.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -31,8 +32,8 @@
 
 /* USER CODE END PTD */
 uint16_t buttonState = 0;
-#define BUFFER_SIZE 1024
-//#define BUFFER_SIZE 16384 // Default size is 1024
+//#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 4096 // Default size is 1024
 uint16_t buffer[BUFFER_SIZE];
 uint16_t bufferPointer = 0;
 uint8_t Buff[10];
@@ -104,6 +105,20 @@ typedef enum {
 	SixteenBit = 0xFFFF
 } NumBits;
 
+uint8_t cout = 0;
+
+void delay_us(uint32_t us) {
+    // Enable the DWT cycle counter
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0; // Reset cycle counter
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk; // Enable cycle counter
+
+    // Calculate the number of cycles needed for the delay
+    uint32_t cycles = (SystemCoreClock / 1000000L) * us;
+
+    // Wait until the number of cycles has elapsed
+    while (DWT->CYCCNT < cycles);
+}
 
 int main(void)
 {
@@ -138,7 +153,6 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
  // HAL_TIM_Base_Start_IT(&htim16);//test remove later.
   while (1)
     {
@@ -151,17 +165,22 @@ int main(void)
   	  	  		  break;
   	  	  	  case postTrigger:
 
+  	  	  		 if(val == BUFFER_SIZE){
+  	  	  			 val = 0;
+  	  	  	  	 }
+
   	  	  		 trigger = 0;
   	  	  		 //Send_Large_USB_Data((void*)buffer, 150 * sizeof(uint16_t));
 				 counter++;
+				 if(val == bufferPointer - 1){
+					 cout++;
+				 }
   	  	  		 sprintf(msg, "%hu\r\n", buffer[val]);
   	  	  		 CDC_Transmit_FS((uint8_t *)msg, strlen(msg));
-  	  	  		 HAL_Delay(1);
+  	  	  		 delay_us(100);
+//  	  	  		 HAL_Delay(1);
   	  	  		 val++;
 /// creat a counter starting from 0 to 1024 and send the data from bufferpointer to 1024
-  	  	  		 if(val == BUFFER_SIZE){
-  	  	  			 val = 0;
-  	  	  		 }
   	  	  		 if (val == bufferPointer) {
   	  	  			counter = 0;
   	  	  			memset(buffer, 0, sizeof(buffer));
@@ -181,7 +200,6 @@ int main(void)
       /* USER CODE BEGIN 3 */
     }
     /* USER CODE END 3 */
-
 
 /**
   * @brief System Clock Configuration
@@ -410,7 +428,7 @@ void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim) {
 	buffer[bufferPointer] = currentValue;
 	// Increment pointer with circular logic
 	bufferPointer++;
-	bufferPointer &= TenBit; // Default: 0x03FF for 10 Bits
+	bufferPointer &= TwelveBit; // Default: 0x03FF for 10 Bits
 
 	if(bufferPointer == BUFFER_SIZE-1){IncFlag = 1;}
 
@@ -448,7 +466,8 @@ void Process_USB_Command(char *cmd) {
 				break;
 			case 1: //stop
 				trigger = 0;
-				HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_1);
+				HAL_TIM_PWM_Stop_IT(&htim2, TIM_CHANNEL_1);
+				state = preTrigger;
 				break;
 			case 2: // set trig edge
 				trigEdge = atoi(cmd);

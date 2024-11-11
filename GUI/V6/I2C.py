@@ -37,7 +37,7 @@ bufferSize = 4096    # Default is 1024
 preTriggerBufferSize = 4000  # Default is 1000
 
 class SerialWorker(QThread):
-    data_ready = pyqtSignal(int)  # For raw data values
+    data_ready = pyqtSignal(int, int)  # For raw data values and sample indices
     decoded_message_ready = pyqtSignal(dict)  # For decoded messages
 
     def __init__(self, port, baudrate, channels=8, group_configs=None):
@@ -77,7 +77,7 @@ class SerialWorker(QThread):
                     try:
                         data_value = int(line.strip())
                         data_buffer.append(data_value)
-                        self.data_ready.emit(data_value)  # Emit data_value for plotting
+                        self.data_ready.emit(data_value, self.sample_idx)  # Emit data_value and sample_idx
                         self.decode_i2c(data_value, self.sample_idx)
                         self.sample_idx += 1  # Increment sample index
                     except ValueError:
@@ -197,6 +197,19 @@ class SerialWorker(QThread):
             # Update last values
             self.scl_last_values[group_idx] = scl
             self.sda_last_values[group_idx] = sda
+            
+    def reset_decoding_states(self):
+        # Reset I2C decoding variables for each group
+        self.states = ['IDLE'] * len(self.group_configs)
+        self.bit_buffers = [[] for _ in range(len(self.group_configs))]
+        self.current_bytes = [0] * len(self.group_configs)
+        self.bit_counts = [0] * len(self.group_configs)
+        self.decoded_messages = [[] for _ in range(len(self.group_configs))]
+        self.scl_last_values = [1] * len(self.group_configs)
+        self.sda_last_values = [1] * len(self.group_configs)
+        self.messages = [[] for _ in range(len(self.group_configs))]
+        self.error_flags = [False] * len(self.group_configs)
+        self.sample_idx = 0  # Reset sample index
 
     def stop_worker(self):
         self.is_running = False
@@ -369,7 +382,9 @@ class I2CDisplay(QWidget):
         self.channels = channels
 
         self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]  # 8 channels
-
+        self.sample_indices = deque(maxlen=bufferSize)
+        self.total_samples = 0
+        
         self.is_single_capture = False
 
         self.current_trigger_modes = ['No Trigger'] * self.channels
@@ -434,8 +449,9 @@ class I2CDisplay(QWidget):
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
-        self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
+        self.plot.setXRange(0, bufferSize / self.sample_rate, padding=0)
         self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
+        self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)  # 8 channels
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
@@ -840,6 +856,18 @@ class I2CDisplay(QWidget):
 
     def clear_data_buffers(self):
         self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]
+        self.total_samples = 0  # Reset total samples
+
+        # Remove all cursors
+        for group_idx in range(4):
+            for cursor_info in self.group_cursors[group_idx]:
+                self.plot.removeItem(cursor_info['line'])
+                self.plot.removeItem(cursor_info['label'])
+            self.group_cursors[group_idx] = []
+
+        # Reset worker's decoding states
+        self.worker.reset_decoding_states()
+
 
     def handle_data_value(self, data_value):
         if self.is_reading:
@@ -847,8 +875,17 @@ class I2CDisplay(QWidget):
             for i in range(self.channels):
                 bit = (data_value >> i) & 1
                 self.data_buffer[i].append(bit)
-            if self.is_single_capture and all(len(buf) >= bufferSize for buf in self.data_buffer):
-                self.stop_single_capture()
+            self.total_samples += 1  # Increment total samples
+
+            # Check if buffers are full
+            if all(len(buf) >= bufferSize for buf in self.data_buffer):
+                if self.is_single_capture:
+                    # In single capture mode, stop acquisition
+                    self.stop_single_capture()
+                else:
+                    # In continuous mode, reset buffers and cursors
+                    self.clear_data_buffers()
+                    self.clear_decoded_text()
 
     def display_decoded_message(self, decoded_data):
         group_idx = decoded_data['group_idx']
@@ -860,21 +897,30 @@ class I2CDisplay(QWidget):
         event = decoded_data.get('event', None)
         
         if event == 'START' and start_sample_idx is not None:
-            # Compute time
-            start_time = start_sample_idx / self.sample_rate
             # Get base level for this group
             base_level = (4 - group_idx - 1) * 4  # Adjust as needed
-            # Get group color
-            group_color = self.colors[group_idx % len(self.colors)]
-            # Create a cursor at start_time
-            start_cursor = pg.InfiniteLine(pos=start_time, angle=90, movable=False, pen=pg.mkPen(color=group_color, width=2))
-            self.plot.addItem(start_cursor)
+            # Set cursor color to fixed color code #B1B1B1
+            cursor_color = '#00F5FF'
+            # Create a vertical line segment between SDA and SCL levels
+            y1 = base_level + 1
+            y2 = base_level + 2
+            x = 0  # Initial x position, will be updated in update_plot
+            # Create line data
+            line = pg.PlotDataItem([x, x], [y1, y2], pen=pg.mkPen(color=cursor_color, width=2))
+            self.plot.addItem(line)
             # Add a label
-            start_label = pg.TextItem(text='Start', anchor=(0.5, 1.0), color=group_color)
-            start_label.setPos(start_time, base_level + 1)
+            # Adjust anchor so that text starts right after the vertical line
+            start_label = pg.TextItem(text='Start', anchor=(0, 0.5), color=cursor_color)
             self.plot.addItem(start_label)
-            # Store the cursor and label
-            self.group_cursors[group_idx].append((start_cursor, start_label))
+            # Store the line, label, and sample index
+            self.group_cursors[group_idx].append({
+                'line': line,
+                'label': start_label,
+                'sample_idx': start_sample_idx,
+                'base_level': base_level,
+                'y1': y1,
+                'y2': y2
+            })
 
         # Build message string
         if event == 'STOP':
@@ -930,32 +976,29 @@ class I2CDisplay(QWidget):
             text_edit.setTextCursor(cursor)
             text_edit.ensureCursorVisible()
 
+
+
     def clear_decoded_text(self):
         # Clear all decoded text boxes and messages per group
         for idx, text_edit in enumerate(self.decoded_texts):
             text_edit.clear()
             self.decoded_messages_per_group[idx] = []
-        # Remove all cursors
-        for group_idx in range(4):
-            for cursor, label in self.group_cursors[group_idx]:
-                self.plot.removeItem(cursor)
-                self.plot.removeItem(label)
-            self.group_cursors[group_idx] = []
+        # Cursors are already cleared in clear_data_buffers
 
     def update_plot(self):
         for group_idx, is_enabled in enumerate(self.i2c_group_enabled):
             if is_enabled:
                 group_config = self.group_configs[group_idx]
-                sda_channel = group_config['data_channel'] - 1  # Adjusting index
-                scl_channel = group_config['clock_channel'] - 1  # Adjusting index
+                sda_channel = group_config['data_channel'] - 1  # Adjust index
+                scl_channel = group_config['clock_channel'] - 1  # Adjust index
 
                 # Get the curves for this group
                 sda_curve = self.group_curves[group_idx]['sda_curve']
                 scl_curve = self.group_curves[group_idx]['scl_curve']
 
                 # Prepare data for plotting
-                sda_data = self.data_buffer[sda_channel]
-                scl_data = self.data_buffer[scl_channel]
+                sda_data = list(self.data_buffer[sda_channel])
+                scl_data = list(self.data_buffer[scl_channel])
 
                 num_samples = len(sda_data)
                 if num_samples > 1:
@@ -964,7 +1007,7 @@ class I2CDisplay(QWidget):
                     # Offset per group to separate the signals vertically
                     base_level = (4 - group_idx - 1) * 4  # Adjust as needed
 
-                    # For SDA
+                    # --- Plot SDA Signal ---
                     sda_square_wave_time = []
                     sda_square_wave_data = []
                     for j in range(1, num_samples):
@@ -977,7 +1020,7 @@ class I2CDisplay(QWidget):
                             sda_square_wave_data.append(level)
                     sda_curve.setData(sda_square_wave_time, sda_square_wave_data)
 
-                    # For SCL
+                    # --- Plot SCL Signal ---
                     scl_square_wave_time = []
                     scl_square_wave_data = []
                     for j in range(1, num_samples):
@@ -989,13 +1032,39 @@ class I2CDisplay(QWidget):
                             level = scl_data[j] + base_level + 2
                             scl_square_wave_data.append(level)
                     scl_curve.setData(scl_square_wave_time, scl_square_wave_data)
+
+                    # --- Update Cursors ---
+                    cursors_to_remove = []
+                    for cursor_info in self.group_cursors[group_idx]:
+                        sample_idx = cursor_info['sample_idx']
+                        idx_in_buffer = sample_idx - (self.total_samples - num_samples)
+                        if 0 <= idx_in_buffer < num_samples:
+                            cursor_time = t[int(idx_in_buffer)]
+                            # Update the line position
+                            x = cursor_time
+                            y1 = cursor_info['y1']
+                            y2 = cursor_info['y2']
+                            cursor_info['line'].setData([x, x], [y1, y2])
+                            # Update the label position
+                            label_offset = (t[1] - t[0]) * 5  # Adjust label offset as needed
+                            cursor_info['label'].setPos(x + label_offset, (y1 + y2) / 2)
+                        else:
+                            # Cursor is no longer in the buffer, remove it
+                            self.plot.removeItem(cursor_info['line'])
+                            self.plot.removeItem(cursor_info['label'])
+                            cursors_to_remove.append(cursor_info)
+                    # Remove cursors that are no longer in buffer
+                    for cursor_info in cursors_to_remove:
+                        self.group_cursors[group_idx].remove(cursor_info)
                 else:
+                    # Clear the curves if no data
                     sda_curve.setData([], [])
                     scl_curve.setData([], [])
             else:
                 # If group is not enabled, hide curves
                 self.group_curves[group_idx]['sda_curve'].setVisible(False)
                 self.group_curves[group_idx]['scl_curve'].setVisible(False)
+
 
     def closeEvent(self, event):
         self.worker.stop_worker()
