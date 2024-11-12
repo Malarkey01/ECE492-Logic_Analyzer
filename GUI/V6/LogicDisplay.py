@@ -20,12 +20,13 @@ from SPI import SPIDisplay
 from UART import UARTDisplay
 
 class LogicDisplay(QMainWindow):
-    def __init__(self, port, baudrate, channels=8):
+    def __init__(self, port, baudrate, bufferSize=4096, channels=8):
         super().__init__()
         self.port = port
         self.default_baudrate = baudrate  # Store default baud rate
         self.baudrate = baudrate
         self.channels = channels
+        self.bufferSize = bufferSize
 
         self.setWindowTitle("Logic Analyzer")
         self.setWindowIcon(get_icon())
@@ -117,18 +118,17 @@ class LogicDisplay(QMainWindow):
 
         # Load the selected module
         if module_name == 'Signal':
-            self.current_module = SignalDisplay(self.port, self.baudrate, self.channels)
+            self.current_module = SignalDisplay(self.port, self.baudrate, self.bufferSize, self.channels)
             self.signal_button.setChecked(True)
         elif module_name == 'I2C':
-            self.current_module = I2CDisplay(self.port, self.baudrate)
+            self.current_module = I2CDisplay(self.port, self.baudrate, self.bufferSize)
             self.i2c_button.setChecked(True)
         elif module_name == 'SPI':
-            self.current_module = SPIDisplay(self.port, self.baudrate)
+            self.current_module = SPIDisplay(self.port, self.baudrate, self.bufferSize)
             self.spi_button.setChecked(True)
         elif module_name == 'UART':
             # Update baud rate if changed in UART mode
-            self.current_module = UARTDisplay(self.port, self.baudrate)
-            self.current_module.baudrate_changed.connect(self.update_baudrate)
+            self.current_module = UARTDisplay(self.port, self.baudrate, self.bufferSize)
             self.uart_button.setChecked(True)
 
         if self.current_module:

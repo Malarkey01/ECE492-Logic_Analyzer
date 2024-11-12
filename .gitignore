@@ -5,5 +5,3 @@ output.txt
 /GUI/V4/__pycache__
 /GUI/V5/__pycache__
 /GUI/V6/__pycache__
-GUI/V6/__pycache__/I2C.cpython-312.pyc
-*.pyc

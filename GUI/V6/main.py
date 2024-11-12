@@ -23,7 +23,7 @@ def main():
 
     if target_port:
         # Device found, directly create LogicDisplay
-        window = LogicDisplay(port=target_port, baudrate=115200, channels=8)
+        window = LogicDisplay(port=target_port, baudrate=115200, bufferSize=4096, channels=8)
         window.show()
         print(f"Automatically connected to device on port {target_port}")
     else:

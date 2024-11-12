@@ -26,17 +26,15 @@ from InterfaceCommands import (
 )
 from aesthetic import get_icon
 
-bufferSize = 1024    # Default is 1024
-preTriggerBufferSize = 1000  # Default is 1000
-
 class SerialWorker(QThread):
     data_ready = pyqtSignal(list)
 
-    def __init__(self, port, baudrate, channels=8):
+    def __init__(self, port, baudrate, bufferSize, channels=8):
         super().__init__()
         self.is_running = True
         self.channels = channels
         self.trigger_modes = ['No Trigger'] * self.channels
+        self.bufferSize = bufferSize
         try:
             self.serial = serial.Serial(port, baudrate)
         except serial.SerialException as e:
@@ -47,8 +45,7 @@ class SerialWorker(QThread):
         self.trigger_modes[channel_idx] = mode
 
     def run(self):
-        pre_trigger_buffer_size = preTriggerBufferSize
-        data_buffer = deque(maxlen=pre_trigger_buffer_size)
+        data_buffer = deque(maxlen=self.bufferSize - 24)
         triggered = [False] * self.channels
 
         while self.is_running:
@@ -139,15 +136,16 @@ class EditableButton(QPushButton):
 
 
 class SignalDisplay(QWidget):
-    def __init__(self, port, baudrate, channels=8):
+    def __init__(self, port, baudrate, bufferSize, channels=8):
         super().__init__()
         self.period = 65454
         self.num_samples = 0
         self.port = port
         self.baudrate = baudrate
         self.channels = channels
+        self.bufferSize = bufferSize
 
-        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]
+        self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]
         self.channel_visibility = [False] * self.channels
 
         self.is_single_capture = False
@@ -161,7 +159,7 @@ class SignalDisplay(QWidget):
 
         self.is_reading = False
 
-        self.worker = SerialWorker(self.port, self.baudrate, channels=self.channels)
+        self.worker = SerialWorker(self.port, self.baudrate, self.bufferSize, channels=self.channels)
         self.worker.data_ready.connect(self.handle_data)
         self.worker.start()
 
@@ -173,7 +171,7 @@ class SignalDisplay(QWidget):
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
         self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
-        self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
+        self.plot.setLimits(xMin=0, xMax=self.bufferSize / self.sample_rate)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
@@ -262,7 +260,7 @@ class SignalDisplay(QWidget):
             print(f"Sample Rate set to {sample_rate} Hz, Period: {period} ticks")
             self.updateSampleTimer(int(period))
             self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
-            self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
+            self.plot.setLimits(xMin=0, xMax=self.bufferSize / self.sample_rate)
         except ValueError as e:
             print(f"Invalid sample rate: {e}")
 
@@ -461,7 +459,7 @@ class SignalDisplay(QWidget):
         self.single_button.setStyleSheet("")
 
     def clear_data_buffers(self):
-        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]
+        self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]
 
     def handle_data(self, data_list):
         if self.is_reading:
@@ -469,7 +467,7 @@ class SignalDisplay(QWidget):
                 for i in range(self.channels):
                     bit_value = (data_value >> i) & 1
                     self.data_buffer[i].append(bit_value)
-            if self.is_single_capture and all(len(buf) >= bufferSize for buf in self.data_buffer):
+            if self.is_single_capture and all(len(buf) >= self.bufferSize for buf in self.data_buffer):
                 self.stop_single_capture()
 
     def update_plot(self):

@@ -33,9 +33,6 @@ from InterfaceCommands import (
 )
 from aesthetic import get_icon
 
-bufferSize = 4096    # Default is 1024
-preTriggerBufferSize = 4000  # Default is 1000
-
 class SerialWorker(QThread):
     data_ready = pyqtSignal(int, int)  # For raw data values and sample indices
     decoded_message_ready = pyqtSignal(dict)  # For decoded messages
@@ -442,16 +439,17 @@ class I2CConfigDialog(QDialog):
         }
 
 class I2CDisplay(QWidget):
-    def __init__(self, port, baudrate, channels=8):
+    def __init__(self, port, baudrate, bufferSize, channels=8):
         super().__init__()
         self.period = 65454
         self.num_samples = 0
         self.port = port
         self.baudrate = baudrate
         self.channels = channels
+        self.bufferSize = bufferSize
 
-        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]  # 8 channels
-        self.sample_indices = deque(maxlen=bufferSize)
+        self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]  # 8 channels
+        self.sample_indices = deque(maxlen=self.bufferSize)
         self.total_samples = 0
         
         self.is_single_capture = False
@@ -515,8 +513,8 @@ class I2CDisplay(QWidget):
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
-        self.plot.setXRange(0, bufferSize / self.sample_rate, padding=0)
-        self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
+        self.plot.setXRange(0, self.bufferSize / self.sample_rate, padding=0)
+        self.plot.setLimits(xMin=0, xMax=self.bufferSize / self.sample_rate)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.setYRange(-2, 2 * self.channels, padding=0)  # 8 channels
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
@@ -691,7 +689,7 @@ class I2CDisplay(QWidget):
             print(f"Sample Rate set to {sample_rate} Hz, Period: {period} ticks")
             self.updateSampleTimer(int(period))
             self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
-            self.plot.setLimits(xMin=0, xMax=bufferSize / self.sample_rate)
+            self.plot.setLimits(xMin=0, xMax=self.bufferSize / self.sample_rate)
         except ValueError as e:
             print(f"Invalid sample rate: {e}")
 
@@ -910,7 +908,7 @@ class I2CDisplay(QWidget):
         self.single_button.setStyleSheet("")
 
     def clear_data_buffers(self):
-        self.data_buffer = [deque(maxlen=bufferSize) for _ in range(self.channels)]
+        self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]
         self.total_samples = 0  # Reset total samples
 
         # Remove all cursors
@@ -933,7 +931,7 @@ class I2CDisplay(QWidget):
             self.total_samples += 1  # Increment total samples
 
             # Check if buffers are full
-            if all(len(buf) >= bufferSize for buf in self.data_buffer):
+            if all(len(buf) >= self.bufferSize for buf in self.data_buffer):
                 if self.is_single_capture:
                     # In single capture mode, stop acquisition
                     self.stop_single_capture()
