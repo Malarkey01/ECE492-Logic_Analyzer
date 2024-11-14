@@ -556,7 +556,7 @@ class I2CDisplay(QWidget):
 
             # Set size policy and fixed width
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-            button.setFixedWidth(150)  # Set the fixed width for the button
+            button.setFixedWidth(100)  # Set the fixed width for the button
 
             button.setCheckable(True)
             button.setChecked(False)
