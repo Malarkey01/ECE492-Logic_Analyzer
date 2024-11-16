@@ -487,7 +487,8 @@ class I2CDisplay(QWidget):
         self.timer.timeout.connect(self.update_plot)
 
         self.is_reading = False
-
+        self.decoded_texts = []
+        
         self.worker = SerialWorker(self.port, self.baudrate, channels=self.channels, group_configs=self.group_configs)
         self.worker.data_ready.connect(self.handle_data_value)
         self.worker.decoded_message_ready.connect(self.display_decoded_message)

@@ -21,9 +21,8 @@ from PyQt6.QtWidgets import (
     QRadioButton,
     QButtonGroup,
     QSizePolicy,
-    QTextEdit,
 )
-from PyQt6.QtGui import QIcon, QIntValidator, QTextCursor, QFont
+from PyQt6.QtGui import QIcon, QIntValidator, QFont
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 from collections import deque
 from InterfaceCommands import (
@@ -33,7 +32,7 @@ from InterfaceCommands import (
 from aesthetic import get_icon
 
 class SerialWorker(QThread):
-    data_ready = pyqtSignal(int)  # For raw data values
+    data_ready = pyqtSignal(int, int)  # For raw data values and sample indices
     decoded_message_ready = pyqtSignal(dict)  # For decoded messages
 
     def __init__(self, port, baudrate, channels=8, group_configs=None):
@@ -42,18 +41,7 @@ class SerialWorker(QThread):
         self.channels = channels
         self.group_configs = group_configs if group_configs else [{} for _ in range(2)]
         self.trigger_modes = ['No Trigger'] * self.channels
-
-        # Initialize SPI decoding variables for each group
-        self.states = ['IDLE'] * len(self.group_configs)
-        self.bit_counts = [0] * len(self.group_configs)
-        self.current_bytes = [0] * len(self.group_configs)
-        self.decoded_messages = [[] for _ in range(len(self.group_configs))]
         self.sample_idx = 0  # Initialize sample index
-
-        # Initialize last values
-        self.ss_last_values = [1] * len(self.group_configs)
-        self.sclk_last_values = [0] * len(self.group_configs)
-        self.mosi_last_values = [0] * len(self.group_configs)
 
         try:
             self.serial = serial.Serial(port, baudrate)
@@ -61,121 +49,169 @@ class SerialWorker(QThread):
             print(f"Failed to open serial port: {str(e)}")
             self.is_running = False
 
+        # Initialize SPI decoding variables for each group
+        self.states = ['IDLE'] * len(self.group_configs)
+        self.current_bits_mosi = [''] * len(self.group_configs)
+        self.current_bits_miso = [''] * len(self.group_configs)
+        self.last_clk_values = [0] * len(self.group_configs)
+        self.last_ss_values = [1] * len(self.group_configs)  # Assuming active low SS
+        self.sample_idx = 0  # Initialize sample index
+
     def set_trigger_mode(self, channel_idx, mode):
         self.trigger_modes[channel_idx] = mode
 
     def run(self):
+        data_buffer = deque(maxlen=1000)
+
         while self.is_running:
             if self.serial.in_waiting:
                 raw_data = self.serial.read(self.serial.in_waiting).splitlines()
                 for line in raw_data:
                     try:
                         data_value = int(line.strip())
-                        self.data_ready.emit(data_value)
-                        self.decode_spi(data_value)
+                        data_buffer.append(data_value)
+                        self.data_ready.emit(data_value, self.sample_idx)  # Emit data_value and sample_idx
+                        self.decode_spi(data_value, self.sample_idx)
                         self.sample_idx += 1  # Increment sample index
                     except ValueError:
                         continue
 
-    def decode_spi(self, data_value):
+    def decode_spi(self, data_value, sample_idx):
         for group_idx, group_config in enumerate(self.group_configs):
             ss_channel = group_config['ss_channel'] - 1
+            clk_channel = group_config['clock_channel'] - 1
             mosi_channel = group_config['mosi_channel'] - 1
-            sclk_channel = group_config['sclk_channel'] - 1
-            num_bits = group_config.get('num_bits', 8)
-            bit_order = group_config.get('bit_order', 'MSB First')
+            miso_channel = group_config['miso_channel'] - 1
+            bits = group_config.get('bits', 8)
+            first_bit = group_config.get('first_bit', 'MSB')
+            ss_active = group_config.get('ss_active', 'Low')
+            data_format = group_config.get('data_format', 'Hexadecimal')
 
-            # Extract SS, MOSI, and SCLK values
+            # Extract SS, CLK, MOSI, MISO values
             ss = (data_value >> ss_channel) & 1
+            clk = (data_value >> clk_channel) & 1
             mosi = (data_value >> mosi_channel) & 1
-            sclk = (data_value >> sclk_channel) & 1
+            miso = (data_value >> miso_channel) & 1
 
-            # Get last values
-            ss_last = self.ss_last_values[group_idx]
-            sclk_last = self.sclk_last_values[group_idx]
+            # Adjust for SS active level
+            ss_active_level = 0 if ss_active == 'Low' else 1
+            ss_inactive_level = 1 - ss_active_level
 
-            # Detect edges on SCLK
-            sclk_edge = sclk != sclk_last
-
+            # State machine for SPI decoding
             state = self.states[group_idx]
-            bit_count = self.bit_counts[group_idx]
-            current_byte = self.current_bytes[group_idx]
+            current_bits_mosi = self.current_bits_mosi[group_idx]
+            current_bits_miso = self.current_bits_miso[group_idx]
+            last_clk = self.last_clk_values[group_idx]
+            last_ss = self.last_ss_values[group_idx]
+
+            # Detect edges on CLK
+            clk_edge = clk != last_clk
+            clk_rising = clk_edge and clk == 1
+            clk_falling = clk_edge and clk == 0
+
+            # Detect SS activation/deactivation
+            ss_edge = ss != last_ss
+            ss_active_now = ss == ss_active_level
+            ss_inactive_now = ss == ss_inactive_level
 
             if state == 'IDLE':
-                if ss == 0:  # Slave Select is active (assuming active low)
+                if ss_active_now:
+                    # SS went active, start capturing data
                     state = 'RECEIVE'
-                    bit_count = 0
-                    current_byte = 0
-                    # Emit SS active signal
-                    self.decoded_message_ready.emit({
-                        'group_idx': group_idx,
-                        'event': 'SS_ACTIVE',
-                        'sample_idx': self.sample_idx,
-                    })
-            if state == 'RECEIVE':
-                if ss == 1:
-                    # SS went inactive, message complete
+                    current_bits_mosi = ''
+                    current_bits_miso = ''
+            elif state == 'RECEIVE':
+                if ss_inactive_now:
+                    # SS went inactive, end of data
+                    if current_bits_mosi or current_bits_miso:
+                        # Emit the decoded data
+                        self.emit_decoded_data(group_idx, current_bits_mosi, current_bits_miso, sample_idx, data_format)
+                        current_bits_mosi = ''
+                        current_bits_miso = ''
                     state = 'IDLE'
-                    if bit_count > 0:
-                        # Emit incomplete byte if any bits were received
-                        self.decoded_message_ready.emit({
-                            'group_idx': group_idx,
-                            'event': 'DATA',
-                            'data': current_byte,
-                            'bits': bit_count,
-                            'sample_idx': self.sample_idx,
-                        })
-                    # Emit SS inactive signal
-                    self.decoded_message_ready.emit({
-                        'group_idx': group_idx,
-                        'event': 'SS_INACTIVE',
-                        'sample_idx': self.sample_idx,
-                    })
-                elif sclk_edge and sclk == 1:  # Rising edge of SCLK
-                    if bit_order == 'MSB First':
-                        current_byte = (current_byte << 1) | mosi
-                    else:
-                        current_byte |= (mosi << bit_count)
-                    bit_count += 1
-                    if bit_count == num_bits:
-                        # Emit byte received
-                        self.decoded_message_ready.emit({
-                            'group_idx': group_idx,
-                            'event': 'DATA',
-                            'data': current_byte,
-                            'bits': num_bits,
-                            'sample_idx': self.sample_idx,
-                        })
-                        bit_count = 0
-                        current_byte = 0
+                else:
+                    # Continue receiving data
+                    # Sample on clock edge (we can assume CPOL=0, CPHA=0 for now)
+                    if clk_rising:
+                        # Sample data
+                        if first_bit == 'MSB':
+                            current_bits_mosi += str(mosi)
+                            current_bits_miso += str(miso)
+                        else:
+                            current_bits_mosi = str(mosi) + current_bits_mosi
+                            current_bits_miso = str(miso) + current_bits_miso
+                        if len(current_bits_mosi) == bits:
+                            # Full data received
+                            self.emit_decoded_data(group_idx, current_bits_mosi, current_bits_miso, sample_idx, data_format)
+                            current_bits_mosi = ''
+                            current_bits_miso = ''
 
-            # Update states
+            # Update stored states
             self.states[group_idx] = state
-            self.bit_counts[group_idx] = bit_count
-            self.current_bytes[group_idx] = current_byte
+            self.current_bits_mosi[group_idx] = current_bits_mosi
+            self.current_bits_miso[group_idx] = current_bits_miso
+            self.last_clk_values[group_idx] = clk
+            self.last_ss_values[group_idx] = ss
 
-            # Update last values
-            self.ss_last_values[group_idx] = ss
-            self.sclk_last_values[group_idx] = sclk
+    def emit_decoded_data(self, group_idx, bits_str_mosi, bits_str_miso, sample_idx, data_format):
+        # Convert bits to integer
+        if bits_str_mosi:
+            data_value_mosi = int(bits_str_mosi, 2)
+        else:
+            data_value_mosi = None
+        if bits_str_miso:
+            data_value_miso = int(bits_str_miso, 2)
+        else:
+            data_value_miso = None
+
+        # Format data according to data_format
+        data_str_mosi = data_str_miso = ''
+        if data_value_mosi is not None:
+            if data_format == 'Binary':
+                data_str_mosi = bin(data_value_mosi)
+            elif data_format == 'Decimal':
+                data_str_mosi = str(data_value_mosi)
+            elif data_format == 'Hexadecimal':
+                data_str_mosi = hex(data_value_mosi)
+            elif data_format == 'ASCII':
+                data_str_mosi = chr(data_value_mosi)
+            else:
+                data_str_mosi = hex(data_value_mosi)
+        if data_value_miso is not None:
+            if data_format == 'Binary':
+                data_str_miso = bin(data_value_miso)
+            elif data_format == 'Decimal':
+                data_str_miso = str(data_value_miso)
+            elif data_format == 'Hexadecimal':
+                data_str_miso = hex(data_value_miso)
+            elif data_format == 'ASCII':
+                data_str_miso = chr(data_value_miso)
+            else:
+                data_str_miso = hex(data_value_miso)
+
+        # Emit the decoded message
+        self.decoded_message_ready.emit({
+            'group_idx': group_idx,
+            'event': 'DATA',
+            'data_mosi': data_str_mosi,
+            'data_miso': data_str_miso,
+            'sample_idx': sample_idx,
+        })
 
     def reset_decoding_states(self):
         # Reset SPI decoding variables for each group
         self.states = ['IDLE'] * len(self.group_configs)
-        self.bit_counts = [0] * len(self.group_configs)
-        self.current_bytes = [0] * len(self.group_configs)
-        self.decoded_messages = [[] for _ in range(len(self.group_configs))]
+        self.current_bits_mosi = [''] * len(self.group_configs)
+        self.current_bits_miso = [''] * len(self.group_configs)
+        self.last_clk_values = [0] * len(self.group_configs)
+        self.last_ss_values = [1] * len(self.group_configs)
         self.sample_idx = 0  # Reset sample index
-
-        # Reset last values
-        self.ss_last_values = [1] * len(self.group_configs)
-        self.sclk_last_values = [0] * len(self.group_configs)
-        self.mosi_last_values = [0] * len(self.group_configs)
 
     def stop_worker(self):
         self.is_running = False
         if self.serial.is_open:
             self.serial.close()
-
+            
 class FixedYViewBox(pg.ViewBox):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -205,7 +241,7 @@ class FixedYViewBox(pg.ViewBox):
             else:
                 x = t
         super().translateBy(x=x, y=y)
-
+        
 class EditableButton(QPushButton):
     def __init__(self, label, parent=None):
         super().__init__(label, parent)
@@ -226,7 +262,7 @@ class EditableButton(QPushButton):
                 self.setText(new_label)
         elif action == reset_action:
             self.setText(self.default_label)
-
+            
 class SPIChannelButton(EditableButton):
     configure_requested = pyqtSignal(int)  # Signal to notify when configure is requested
     reset_requested = pyqtSignal(int)      # New signal for reset
@@ -264,9 +300,9 @@ class SPIConfigDialog(QDialog):
     def init_ui(self):
         layout = QVBoxLayout()
 
-        # Slave Select Channel Selection
+        # SS Channel Selection
         ss_layout = QHBoxLayout()
-        ss_label = QLabel("Slave Select Channel:")
+        ss_label = QLabel("Select:")
         self.ss_combo = QComboBox()
         self.ss_combo.addItems([f"Channel {i+1}" for i in range(8)])
         self.ss_combo.setCurrentIndex(self.current_config.get('ss_channel', 1) - 1)
@@ -274,59 +310,87 @@ class SPIConfigDialog(QDialog):
         ss_layout.addWidget(self.ss_combo)
         layout.addLayout(ss_layout)
 
-        # Data Channel Selection
-        data_layout = QHBoxLayout()
-        data_label = QLabel("Data Channel:")
-        self.data_combo = QComboBox()
-        self.data_combo.addItems([f"Channel {i+1}" for i in range(8)])
-        self.data_combo.setCurrentIndex(self.current_config.get('mosi_channel', 2) - 1)
-        data_layout.addWidget(data_label)
-        data_layout.addWidget(self.data_combo)
-        layout.addLayout(data_layout)
+        # SS Active Level
+        ss_active_layout = QHBoxLayout()
+        ss_active_label = QLabel("Active:")
+        self.ss_active_group = QButtonGroup(self)
+        self.ss_active_low = QRadioButton("Low")
+        self.ss_active_high = QRadioButton("High")
+        self.ss_active_group.addButton(self.ss_active_low)
+        self.ss_active_group.addButton(self.ss_active_high)
+        ss_active_layout.addWidget(ss_active_label)
+        ss_active_layout.addWidget(self.ss_active_low)
+        ss_active_layout.addWidget(self.ss_active_high)
+        layout.addLayout(ss_active_layout)
+
+        if self.current_config.get('ss_active', 'Low') == 'Low':
+            self.ss_active_low.setChecked(True)
+        else:
+            self.ss_active_high.setChecked(True)
 
         # Clock Channel Selection
         clock_layout = QHBoxLayout()
-        clock_label = QLabel("Clock Channel:")
+        clock_label = QLabel("Clock:")
         self.clock_combo = QComboBox()
         self.clock_combo.addItems([f"Channel {i+1}" for i in range(8)])
-        self.clock_combo.setCurrentIndex(self.current_config.get('sclk_channel', 3) - 1)
+        self.clock_combo.setCurrentIndex(self.current_config.get('clock_channel', 2) - 1)
         clock_layout.addWidget(clock_label)
         clock_layout.addWidget(self.clock_combo)
         layout.addLayout(clock_layout)
 
-        # Number of Data Bits
+        # MOSI Channel Selection
+        mosi_layout = QHBoxLayout()
+        mosi_label = QLabel("MOSI:")
+        self.mosi_combo = QComboBox()
+        self.mosi_combo.addItems([f"Channel {i+1}" for i in range(8)])
+        self.mosi_combo.setCurrentIndex(self.current_config.get('mosi_channel', 3) - 1)
+        mosi_layout.addWidget(mosi_label)
+        mosi_layout.addWidget(self.mosi_combo)
+        layout.addLayout(mosi_layout)
+
+        # MISO Channel Selection
+        miso_layout = QHBoxLayout()
+        miso_label = QLabel("MISO:")
+        self.miso_combo = QComboBox()
+        self.miso_combo.addItems([f"Channel {i+1}" for i in range(8)])
+        self.miso_combo.setCurrentIndex(self.current_config.get('miso_channel', 4) - 1)
+        miso_layout.addWidget(miso_label)
+        miso_layout.addWidget(self.miso_combo)
+        layout.addLayout(miso_layout)
+
+        # Bits Selection
         bits_layout = QHBoxLayout()
-        bits_label = QLabel("Number of Data Bits:")
+        bits_label = QLabel("Data Bits:")
         self.bits_input = QLineEdit()
         self.bits_input.setValidator(QIntValidator(1, 32))
-        self.bits_input.setText(str(self.current_config.get('num_bits', 8)))
+        self.bits_input.setText(str(self.current_config.get('bits', 8)))
         bits_layout.addWidget(bits_label)
         bits_layout.addWidget(self.bits_input)
         layout.addLayout(bits_layout)
 
-        # Bit Order Selection
-        order_layout = QHBoxLayout()
-        order_label = QLabel("Bit Order:")
-        self.order_group = QButtonGroup(self)
-        self.order_msb = QRadioButton("MSB First")
-        self.order_lsb = QRadioButton("LSB First")
-        self.order_group.addButton(self.order_msb)
-        self.order_group.addButton(self.order_lsb)
-        order_layout.addWidget(order_label)
-        order_layout.addWidget(self.order_msb)
-        order_layout.addWidget(self.order_lsb)
-        layout.addLayout(order_layout)
+        # First Bit Selection
+        first_layout = QHBoxLayout()
+        first_label = QLabel("First Bit:")
+        self.first_group = QButtonGroup(self)
+        self.first_msb = QRadioButton("MSB")
+        self.first_lsb = QRadioButton("LSB")
+        self.first_group.addButton(self.first_msb)
+        self.first_group.addButton(self.first_lsb)
+        first_layout.addWidget(first_label)
+        first_layout.addWidget(self.first_msb)
+        first_layout.addWidget(self.first_lsb)
+        layout.addLayout(first_layout)
 
-        if self.current_config.get('bit_order', 'MSB First') == 'MSB First':
-            self.order_msb.setChecked(True)
+        if self.current_config.get('first_bit', 'MSB') == 'MSB':
+            self.first_msb.setChecked(True)
         else:
-            self.order_lsb.setChecked(True)
+            self.first_lsb.setChecked(True)
 
         # Data Format Selection
         format_layout = QHBoxLayout()
         format_label = QLabel("Data Format:")
         self.format_combo = QComboBox()
-        self.format_combo.addItems(["Binary", "Decimal", "Hexadecimal", "BCD", "ASCII"])
+        self.format_combo.addItems(["Binary", "Decimal", "Hexadecimal", "ASCII"])
         self.format_combo.setCurrentText(self.current_config.get('data_format', 'Hexadecimal'))
         format_layout.addWidget(format_label)
         format_layout.addWidget(self.format_combo)
@@ -347,13 +411,15 @@ class SPIConfigDialog(QDialog):
     def get_configuration(self):
         return {
             'ss_channel': self.ss_combo.currentIndex() + 1,
-            'mosi_channel': self.data_combo.currentIndex() + 1,
-            'sclk_channel': self.clock_combo.currentIndex() + 1,
-            'num_bits': int(self.bits_input.text()),
-            'bit_order': 'MSB First' if self.order_msb.isChecked() else 'LSB First',
+            'ss_active': 'Low' if self.ss_active_low.isChecked() else 'High',
+            'clock_channel': self.clock_combo.currentIndex() + 1,
+            'mosi_channel': self.mosi_combo.currentIndex() + 1,
+            'miso_channel': self.miso_combo.currentIndex() + 1,
+            'bits': int(self.bits_input.text()),
+            'first_bit': 'MSB' if self.first_msb.isChecked() else 'LSB',
             'data_format': self.format_combo.currentText(),
         }
-
+        
 class SPIDisplay(QWidget):
     def __init__(self, port, baudrate, bufferSize, channels=8):
         super().__init__()
@@ -375,15 +441,16 @@ class SPIDisplay(QWidget):
 
         self.sample_rate = 1000  # Default sample rate in Hz
 
-        # Initialize group configurations with default channels
+        # Initialize group configurations with default channels and settings
         self.group_configs = [
-            {'ss_channel': 1, 'mosi_channel': 2, 'sclk_channel': 3, 'num_bits': 8, 'bit_order': 'MSB First', 'data_format': 'Hexadecimal'},
-            {'ss_channel': 4, 'mosi_channel': 5, 'sclk_channel': 6, 'num_bits': 8, 'bit_order': 'MSB First', 'data_format': 'Hexadecimal'},
+            {'ss_channel': 1, 'clock_channel': 2, 'mosi_channel': 3, 'miso_channel': 4, 'bits':8, 'first_bit':'MSB', 'ss_active':'Low', 'data_format':'Hexadecimal'},
+            {'ss_channel': 5, 'clock_channel': 6, 'mosi_channel': 7, 'miso_channel': 8, 'bits':8, 'first_bit':'MSB', 'ss_active':'Low', 'data_format':'Hexadecimal'},
         ]
 
+        # Default group configurations
         self.default_group_configs = [
-            {'ss_channel': 1, 'mosi_channel': 2, 'sclk_channel': 3, 'num_bits': 8, 'bit_order': 'MSB First', 'data_format': 'Hexadecimal'},
-            {'ss_channel': 4, 'mosi_channel': 5, 'sclk_channel': 6, 'num_bits': 8, 'bit_order': 'MSB First', 'data_format': 'Hexadecimal'},
+            {'ss_channel': 1, 'clock_channel': 2, 'mosi_channel': 3, 'miso_channel': 4, 'bits':8, 'first_bit':'MSB', 'ss_active':'Low', 'data_format':'Hexadecimal'},
+            {'ss_channel': 5, 'clock_channel': 6, 'mosi_channel': 7, 'miso_channel': 8, 'bits':8, 'first_bit':'MSB', 'ss_active':'Low', 'data_format':'Hexadecimal'},
         ]
 
         self.spi_group_enabled = [False] * 2  # Track which SPI groups are enabled
@@ -405,15 +472,17 @@ class SPIDisplay(QWidget):
         self.worker.start()
 
         self.group_curves = []
-        for group_idx in range(2):  # Assuming 2 groups
-            # Create curves for MOSI, MISO, SCLK, and SS for each group
-            mosi_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=4))
-            sclk_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=4))
-            ss_curve = self.plot.plot(pen=pg.mkPen(color='#FFA500', width=4))  # Orange for SS
-            mosi_curve.setVisible(False)
-            sclk_curve.setVisible(False)
+        for group_idx in range(2):  # 2 groups
+            # Create curves for SS, CLK, MOSI, MISO for each group
+            ss_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=2))
+            clk_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=2))
+            mosi_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=2))
+            miso_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[(group_idx+1) % len(self.colors)], width=2))
             ss_curve.setVisible(False)
-            self.group_curves.append({'mosi_curve': mosi_curve, 'sclk_curve': sclk_curve, 'ss_curve': ss_curve})
+            clk_curve.setVisible(False)
+            mosi_curve.setVisible(False)
+            miso_curve.setVisible(False)
+            self.group_curves.append({'ss_curve': ss_curve, 'clk_curve': clk_curve, 'mosi_curve': mosi_curve, 'miso_curve': miso_curve})
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -438,17 +507,19 @@ class SPIDisplay(QWidget):
         self.plot.getAxis('left').setPen(None)
         self.plot.setLabel('bottom', 'Time', units='s')
 
-        self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF']
+        self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
         self.group_curves = []
-        for group_idx in range(2):  # Assuming 2 groups
-            # Create curves for MOSI, SCLK, and SS for each group
-            mosi_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=4))
-            sclk_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=4))
-            ss_curve = self.plot.plot(pen=pg.mkPen(color='#FFA500', width=4))  # Orange for SS
-            mosi_curve.setVisible(False)
-            sclk_curve.setVisible(False)
+        for group_idx in range(2):  # 2 groups
+            # Create curves for SS, CLK, MOSI, MISO for each group
+            ss_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=2))
+            clk_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=2))
+            mosi_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=2))
+            miso_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[(group_idx+1) % len(self.colors)], width=2))
             ss_curve.setVisible(False)
-            self.group_curves.append({'mosi_curve': mosi_curve, 'sclk_curve': sclk_curve, 'ss_curve': ss_curve})
+            clk_curve.setVisible(False)
+            mosi_curve.setVisible(False)
+            miso_curve.setVisible(False)
+            self.group_curves.append({'ss_curve': ss_curve, 'clk_curve': clk_curve, 'mosi_curve': mosi_curve, 'miso_curve': miso_curve})
 
         button_layout = QGridLayout()
         plot_layout.addLayout(button_layout, stretch=1)  # Allocate less space to the control panel
@@ -458,20 +529,22 @@ class SPIDisplay(QWidget):
         plot_layout.addWidget(button_widget)
 
         self.channel_buttons = []
-        self.trigger_mode_buttons = []
+        self.ss_trigger_mode_buttons = []
+        self.clk_trigger_mode_buttons = []
 
         for i in range(2):
             row = i * 2  # Increment by 2 for each group
             group_config = self.group_configs[i]
             ss_channel = group_config['ss_channel']
+            clk_channel = group_config['clock_channel']
             mosi_channel = group_config['mosi_channel']
-            sclk_channel = group_config['sclk_channel']
-            label = f"SPI {i+1}\nCh{ss_channel}:SS\nCh{mosi_channel}:MOSI\nCh{sclk_channel}:SCLK"
+            miso_channel = group_config['miso_channel']
+            label = f"SPI {i+1}\nCh{ss_channel}:SS\nCh{clk_channel}:SCLK\nCh{mosi_channel}:MOSI\nCh{miso_channel}:MISO"
             button = SPIChannelButton(label, group_idx=i)
 
             # Set size policy and fixed width
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-            button.setFixedWidth(120)  # Set the fixed width for the button
+            button.setFixedWidth(150)  # Set the fixed width for the button
 
             button.setCheckable(True)
             button.setChecked(False)
@@ -479,18 +552,27 @@ class SPIDisplay(QWidget):
             button.configure_requested.connect(self.open_configuration_dialog)
             button_layout.addWidget(button, row, 0, 2, 1)  # Span 2 rows, 1 column
 
-            # Trigger Mode Button
-            trigger_button = QPushButton(f"Trigger - {self.current_trigger_modes[ss_channel - 1]}")
-            trigger_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-            trigger_button.setFixedWidth(150)
-            trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx))
-            button_layout.addWidget(trigger_button, row, 1)
+            # SS Trigger Mode Button
+            ss_trigger_button = QPushButton(f"SS - {self.current_trigger_modes[ss_channel - 1]}")
+            ss_trigger_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+            ss_trigger_button.setFixedWidth(120)
+            ss_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'SS'))
+            button_layout.addWidget(ss_trigger_button, row, 1)
+
+            # CLK Trigger Mode Button
+            clk_trigger_button = QPushButton(f"SCLK - {self.current_trigger_modes[clk_channel - 1]}")
+            clk_trigger_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+            clk_trigger_button.setFixedWidth(120)
+            clk_trigger_button.clicked.connect(lambda _, idx=i: self.toggle_trigger_mode(idx, 'CLK'))
+            button_layout.addWidget(clk_trigger_button, row + 1, 1)
 
             # Set row stretches to distribute space equally
             button_layout.setRowStretch(row, 1)
+            button_layout.setRowStretch(row + 1, 1)
 
             self.channel_buttons.append(button)
-            self.trigger_mode_buttons.append(trigger_button)
+            self.ss_trigger_mode_buttons.append(ss_trigger_button)
+            self.clk_trigger_mode_buttons.append(clk_trigger_button)
 
             button.reset_requested.connect(self.reset_group_to_default)
 
@@ -543,6 +625,9 @@ class SPIDisplay(QWidget):
         plot_layout.setStretchFactor(self.graph_layout, 1)  # The plot area should expand
         plot_layout.setStretchFactor(button_widget, 0)      # The button area remains fixed
 
+        # Initialize other components
+        self.channel_visibility = [False] * self.channels
+        
     def reset_group_to_default(self, group_idx):
         # Reset the group configuration to default settings
         default_config = self.default_group_configs[group_idx].copy()
@@ -553,26 +638,27 @@ class SPIDisplay(QWidget):
         self.channel_buttons[group_idx].setText(self.channel_buttons[group_idx].default_label)
 
         # Update trigger mode buttons
-        ss_channel = default_config['ss_channel']
-        ss_idx = ss_channel - 1
+        sda_channel = default_config['data_channel']
+        scl_channel = default_config['clock_channel']
+        sda_idx = sda_channel - 1
+        scl_idx = scl_channel - 1
 
-        self.current_trigger_modes[ss_idx] = 'No Trigger'
-        self.trigger_mode_buttons[group_idx].setText(f"Trigger - {self.current_trigger_modes[ss_idx]}")
+        self.current_trigger_modes[sda_idx] = 'No Trigger'
+        self.current_trigger_modes[scl_idx] = 'No Trigger'
+        self.sda_trigger_mode_buttons[group_idx].setText(f"SDA - {self.current_trigger_modes[sda_idx]}")
+        self.scl_trigger_mode_buttons[group_idx].setText(f"SCL - {self.current_trigger_modes[scl_idx]}")
 
         # Update worker's group configurations
         self.worker.group_configs[group_idx] = default_config
 
         # Update curves visibility and colors
-        is_checked = self.spi_group_enabled[group_idx]
-        mosi_curve = self.group_curves[group_idx]['mosi_curve']
-        sclk_curve = self.group_curves[group_idx]['sclk_curve']
-        ss_curve = self.group_curves[group_idx]['ss_curve']
-        mosi_curve.setVisible(is_checked)
-        sclk_curve.setVisible(is_checked)
-        ss_curve.setVisible(is_checked)
-        mosi_curve.setPen(pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=4))
-        sclk_curve.setPen(pg.mkPen(color='#DEDEDE', width=4))
-        ss_curve.setPen(pg.mkPen(color='#FFA500', width=4))
+        is_checked = self.i2c_group_enabled[group_idx]
+        sda_curve = self.group_curves[group_idx]['sda_curve']
+        scl_curve = self.group_curves[group_idx]['scl_curve']
+        sda_curve.setVisible(is_checked)
+        scl_curve.setVisible(is_checked)
+        sda_curve.setPen(pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=4))
+        scl_curve.setPen(pg.mkPen(color='#DEDEDE', width=4))
 
         # Clear data buffers
         self.clear_data_buffers()
@@ -581,6 +667,7 @@ class SPIDisplay(QWidget):
         self.channel_buttons[group_idx].setStyleSheet("")
 
         print(f"Group {group_idx+1} has been reset to default settings.")
+
 
     def handle_sample_rate_input(self):
         try:
@@ -689,38 +776,43 @@ class SPIDisplay(QWidget):
         except Exception as e:
             print(f"Failed to update trigger timer: {e}")
 
-    def toggle_trigger_mode(self, group_idx):
+    def toggle_trigger_mode(self, group_idx, line):
         group_config = self.group_configs[group_idx]
-        ss_channel = group_config['ss_channel'] - 1  # Adjust index
-        button = self.trigger_mode_buttons[group_idx]
+        if line == 'SDA':
+            channel_idx = group_config['data_channel'] - 1  # Adjust index
+            button = self.sda_trigger_mode_buttons[group_idx]
+        elif line == 'SCL':
+            channel_idx = group_config['clock_channel'] - 1  # Adjust index
+            button = self.scl_trigger_mode_buttons[group_idx]
+        else:
+            return
 
         # Cycle through trigger modes
-        current_mode = self.current_trigger_modes[ss_channel]
+        current_mode = self.current_trigger_modes[channel_idx]
         current_mode_idx = self.trigger_mode_options.index(current_mode)
         new_mode_idx = (current_mode_idx + 1) % len(self.trigger_mode_options)
         new_mode = self.trigger_mode_options[new_mode_idx]
-        self.current_trigger_modes[ss_channel] = new_mode
-        button.setText(f"Trigger - {new_mode}")
-        self.worker.set_trigger_mode(ss_channel, new_mode)
+        self.current_trigger_modes[channel_idx] = new_mode
+        button.setText(f"{line} - {new_mode}")
+        self.worker.set_trigger_mode(channel_idx, new_mode)
         self.send_trigger_edge_command()
         self.send_trigger_pins_command()
+
 
     def is_light_color(self, hex_color):
         hex_color = hex_color.lstrip('#')
         r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
         luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
         return luminance > 0.5
-
+    
     def toggle_channel_group(self, group_idx, is_checked):
-        self.spi_group_enabled[group_idx] = is_checked  # Update the enabled list
+        self.i2c_group_enabled[group_idx] = is_checked  # Update the enabled list
 
         # Update curves visibility
-        mosi_curve = self.group_curves[group_idx]['mosi_curve']
-        sclk_curve = self.group_curves[group_idx]['sclk_curve']
-        ss_curve = self.group_curves[group_idx]['ss_curve']
-        mosi_curve.setVisible(is_checked)
-        sclk_curve.setVisible(is_checked)
-        ss_curve.setVisible(is_checked)
+        sda_curve = self.group_curves[group_idx]['sda_curve']
+        scl_curve = self.group_curves[group_idx]['scl_curve']
+        sda_curve.setVisible(is_checked)
+        scl_curve.setVisible(is_checked)
 
         button = self.channel_buttons[group_idx]
         if is_checked:
@@ -731,6 +823,7 @@ class SPIDisplay(QWidget):
                                  f"text-align: left; }}")
         else:
             button.setStyleSheet("")
+
 
     def toggle_reading(self):
         if self.is_reading:
@@ -809,7 +902,7 @@ class SPIDisplay(QWidget):
         self.total_samples = 0  # Reset total samples
 
         # Remove all cursors
-        for group_idx in range(2):
+        for group_idx in range(4):
             for cursor_info in self.group_cursors[group_idx]:
                 self.plot.removeItem(cursor_info['line'])
                 self.plot.removeItem(cursor_info['label'])
@@ -817,6 +910,7 @@ class SPIDisplay(QWidget):
 
         # Reset worker's decoding states
         self.worker.reset_decoding_states()
+
 
     def handle_data_value(self, data_value):
         if self.is_reading:
@@ -835,7 +929,7 @@ class SPIDisplay(QWidget):
                     # In continuous mode, reset buffers and cursors
                     self.clear_data_buffers()
                     self.clear_decoded_text()
-
+                    
     def display_decoded_message(self, decoded_data):
         group_idx = decoded_data['group_idx']
         if not self.spi_group_enabled[group_idx]:
@@ -844,41 +938,25 @@ class SPIDisplay(QWidget):
         event = decoded_data.get('event', None)
         sample_idx = decoded_data.get('sample_idx', None)
 
-        if event == 'SS_ACTIVE' and sample_idx is not None:
-            # Create cursor for SS active
-            self.create_cursor(group_idx, sample_idx, 'SS Active')
-        elif event == 'SS_INACTIVE' and sample_idx is not None:
-            # Create cursor for SS inactive
-            self.create_cursor(group_idx, sample_idx, 'SS Inactive')
-        elif event == 'DATA':
-            # Create cursor for Data byte
-            data_byte = decoded_data['data']
-            num_bits = decoded_data.get('bits', self.group_configs[group_idx].get('num_bits', 8))
-
-            if data_format == 'Binary':
-                data_str = bin(data_byte)[2:].zfill(num_bits)
-            elif data_format == 'Decimal':
-                data_str = str(data_byte)
-            elif data_format == 'Hexadecimal':
-                data_str = hex(data_byte)
-            elif data_format == 'ASCII':
-                data_str = chr(data_byte)
-            elif data_format == 'BCD':
-                # Convert to BCD representation
-                data_str = ''.join([str((data_byte >> 4*i) & 0xF) for i in reversed(range((num_bits+3)//4))])
-            else:
-                data_str = hex(data_byte)
-            label_text = f"D:{data_str}"
-            self.create_cursor(group_idx, sample_idx, label_text)
-
+        if event == 'DATA':
+            data_mosi = decoded_data.get('data_mosi', '')
+            data_miso = decoded_data.get('data_miso', '')
+            label_text = ''
+            if data_mosi:
+                label_text += f"MOSI: {data_mosi} "
+            if data_miso:
+                label_text += f"MISO: {data_miso}"
+            if label_text:
+                self.create_cursor(group_idx, sample_idx, label_text)
+                
     def create_cursor(self, group_idx, sample_idx, label_text):
         # Get base level for this group
-        base_level = (2 - group_idx - 1) * 4  # Adjust as needed
-        # Cursor color
+        base_level = (4 - group_idx - 1) * 4  # Adjust as needed
+        # Cursor color (keeping your tweaks)
         cursor_color = '#00F5FF'  # Use your preferred color
-        # Create a vertical line segment between MOSI and SCLK levels
-        y1 = base_level
-        y2 = base_level + 3
+        # Create a vertical line segment between SDA and SCL levels
+        y1 = base_level + 1
+        y2 = base_level + 2
         x = 0  # Initial x position, will be updated in update_plot
         # Create line data
         line = pg.PlotDataItem([x, x], [y1, y2], pen=pg.mkPen(color=cursor_color, width=2))
@@ -898,75 +976,60 @@ class SPIDisplay(QWidget):
             'y2': y2
         })
 
+
     def clear_decoded_text(self):
-        # Clear all decoded messages per group
-        for idx in range(2):
+        # Clear all decoded text boxes and messages per group
+        for idx, text_edit in enumerate(self.decoded_texts):
             self.decoded_messages_per_group[idx] = []
         # Cursors are already cleared in clear_data_buffers
 
     def update_plot(self):
-        for group_idx, is_enabled in enumerate(self.spi_group_enabled):
+        for group_idx, is_enabled in enumerate(self.i2c_group_enabled):
             if is_enabled:
                 group_config = self.group_configs[group_idx]
-                ss_channel = group_config['ss_channel'] - 1  # Adjust index
-                mosi_channel = group_config['mosi_channel'] - 1  # Adjust index
-                sclk_channel = group_config['sclk_channel'] - 1  # Adjust index
+                sda_channel = group_config['data_channel'] - 1  # Adjust index
+                scl_channel = group_config['clock_channel'] - 1  # Adjust index
 
                 # Get the curves for this group
-                mosi_curve = self.group_curves[group_idx]['mosi_curve']
-                sclk_curve = self.group_curves[group_idx]['sclk_curve']
-                ss_curve = self.group_curves[group_idx]['ss_curve']
+                sda_curve = self.group_curves[group_idx]['sda_curve']
+                scl_curve = self.group_curves[group_idx]['scl_curve']
 
                 # Prepare data for plotting
-                mosi_data = list(self.data_buffer[mosi_channel])
-                sclk_data = list(self.data_buffer[sclk_channel])
-                ss_data = list(self.data_buffer[ss_channel])
+                sda_data = list(self.data_buffer[sda_channel])
+                scl_data = list(self.data_buffer[scl_channel])
 
-                num_samples = len(mosi_data)
+                num_samples = len(sda_data)
                 if num_samples > 1:
                     t = np.arange(num_samples) / self.sample_rate
 
                     # Offset per group to separate the signals vertically
-                    base_level = (2 - group_idx - 1) * 4  # Adjust as needed
+                    base_level = (4 - group_idx - 1) * 4  # Adjust as needed
 
-                    # --- Plot MOSI Signal ---
-                    mosi_square_wave_time = []
-                    mosi_square_wave_data = []
+                    # --- Plot SDA Signal ---
+                    sda_square_wave_time = []
+                    sda_square_wave_data = []
                     for j in range(1, num_samples):
-                        mosi_square_wave_time.extend([t[j - 1], t[j]])
-                        level = mosi_data[j - 1] + base_level
-                        mosi_square_wave_data.extend([level, level])
-                        if mosi_data[j] != mosi_data[j - 1]:
-                            mosi_square_wave_time.append(t[j])
-                            level = mosi_data[j] + base_level
-                            mosi_square_wave_data.append(level)
-                    mosi_curve.setData(mosi_square_wave_time, mosi_square_wave_data)
+                        sda_square_wave_time.extend([t[j - 1], t[j]])
+                        level = sda_data[j - 1] + base_level
+                        sda_square_wave_data.extend([level, level])
+                        if sda_data[j] != sda_data[j - 1]:
+                            sda_square_wave_time.append(t[j])
+                            level = sda_data[j] + base_level
+                            sda_square_wave_data.append(level)
+                    sda_curve.setData(sda_square_wave_time, sda_square_wave_data)
 
-                    # --- Plot SCLK Signal ---
-                    sclk_square_wave_time = []
-                    sclk_square_wave_data = []
+                    # --- Plot SCL Signal ---
+                    scl_square_wave_time = []
+                    scl_square_wave_data = []
                     for j in range(1, num_samples):
-                        sclk_square_wave_time.extend([t[j - 1], t[j]])
-                        level = sclk_data[j - 1] + base_level + 1  # Offset by 1 to separate from MOSI
-                        sclk_square_wave_data.extend([level, level])
-                        if sclk_data[j] != sclk_data[j - 1]:
-                            sclk_square_wave_time.append(t[j])
-                            level = sclk_data[j] + base_level + 1
-                            sclk_square_wave_data.append(level)
-                    sclk_curve.setData(sclk_square_wave_time, sclk_square_wave_data)
-
-                    # --- Plot SS Signal ---
-                    ss_square_wave_time = []
-                    ss_square_wave_data = []
-                    for j in range(1, num_samples):
-                        ss_square_wave_time.extend([t[j - 1], t[j]])
-                        level = ss_data[j - 1] + base_level + 2  # Offset by 2 to separate from SCLK
-                        ss_square_wave_data.extend([level, level])
-                        if ss_data[j] != ss_data[j - 1]:
-                            ss_square_wave_time.append(t[j])
-                            level = ss_data[j] + base_level + 2
-                            ss_square_wave_data.append(level)
-                    ss_curve.setData(ss_square_wave_time, ss_square_wave_data)
+                        scl_square_wave_time.extend([t[j - 1], t[j]])
+                        level = scl_data[j - 1] + base_level + 2  # Offset by 2 to separate from SDA
+                        scl_square_wave_data.extend([level, level])
+                        if scl_data[j] != scl_data[j - 1]:
+                            scl_square_wave_time.append(t[j])
+                            level = scl_data[j] + base_level + 2
+                            scl_square_wave_data.append(level)
+                    scl_curve.setData(scl_square_wave_time, scl_square_wave_data)
 
                     # --- Update Cursors ---
                     cursors_to_remove = []
@@ -1021,14 +1084,13 @@ class SPIDisplay(QWidget):
                                 last_label_x = x_pos
                 else:
                     # Clear the curves if no data
-                    mosi_curve.setData([], [])
-                    sclk_curve.setData([], [])
-                    ss_curve.setData([], [])
+                    sda_curve.setData([], [])
+                    scl_curve.setData([], [])
             else:
                 # If group is not enabled, hide curves
-                self.group_curves[group_idx]['mosi_curve'].setVisible(False)
-                self.group_curves[group_idx]['sclk_curve'].setVisible(False)
-                self.group_curves[group_idx]['ss_curve'].setVisible(False)
+                self.group_curves[group_idx]['sda_curve'].setVisible(False)
+                self.group_curves[group_idx]['scl_curve'].setVisible(False)
+
 
     def closeEvent(self, event):
         self.worker.stop_worker()
@@ -1044,21 +1106,19 @@ class SPIDisplay(QWidget):
             self.group_configs[group_idx] = new_config
             print(f"Configuration for group {group_idx+1} updated: {new_config}")
             # Update labels on the button to reflect new channel assignments
-            ss_channel = new_config['ss_channel']
-            mosi_channel = new_config['mosi_channel']
-            sclk_channel = new_config['sclk_channel']
-            label = f"SPI {group_idx+1}\nCh{ss_channel}:SS\nCh{mosi_channel}:MOSI\nCh{sclk_channel}:SCLK"
+            sda_channel = new_config['data_channel']
+            scl_channel = new_config['clock_channel']
+            label = f"I2C {group_idx+1}\nCh{sda_channel}:SDA\nCh{scl_channel}:SCL"
             self.channel_buttons[group_idx].setText(label)
             # Update trigger mode buttons
-            self.trigger_mode_buttons[group_idx].setText(f"Trigger - {self.current_trigger_modes[ss_channel - 1]}")
+            self.sda_trigger_mode_buttons[group_idx].setText(f"SDA - {self.current_trigger_modes[sda_channel - 1]}")
+            self.scl_trigger_mode_buttons[group_idx].setText(f"SCL - {self.current_trigger_modes[scl_channel - 1]}")
             # Update curves visibility
-            is_checked = self.spi_group_enabled[group_idx]
-            mosi_curve = self.group_curves[group_idx]['mosi_curve']
-            sclk_curve = self.group_curves[group_idx]['sclk_curve']
-            ss_curve = self.group_curves[group_idx]['ss_curve']
-            mosi_curve.setVisible(is_checked)
-            sclk_curve.setVisible(is_checked)
-            ss_curve.setVisible(is_checked)
+            is_checked = self.i2c_group_enabled[group_idx]
+            sda_curve = self.group_curves[group_idx]['sda_curve']
+            scl_curve = self.group_curves[group_idx]['scl_curve']
+            sda_curve.setVisible(is_checked)
+            scl_curve.setVisible(is_checked)
             # Clear data buffers
             self.clear_data_buffers()
             # Update worker's group configurations
