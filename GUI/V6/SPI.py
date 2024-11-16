@@ -471,6 +471,7 @@ class SPIDisplay(QWidget):
         self.worker.decoded_message_ready.connect(self.display_decoded_message)
         self.worker.start()
 
+        self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
         self.group_curves = []
         for group_idx in range(2):  # 2 groups
             # Create curves for SS, CLK, MOSI, MISO for each group
@@ -498,7 +499,7 @@ class SPIDisplay(QWidget):
         self.plot.setXRange(0, self.bufferSize / self.sample_rate, padding=0)
         self.plot.setLimits(xMin=0, xMax=self.bufferSize / self.sample_rate)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
-        self.plot.setYRange(-2, 2 * self.channels, padding=0)  # 8 channels
+        self.plot.setYRange(-2, 2 * self.channels, padding=0)  # Adjust as needed
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
@@ -506,20 +507,6 @@ class SPIDisplay(QWidget):
         self.plot.getAxis('left').setStyle(showValues=False)
         self.plot.getAxis('left').setPen(None)
         self.plot.setLabel('bottom', 'Time', units='s')
-
-        self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
-        self.group_curves = []
-        for group_idx in range(2):  # 2 groups
-            # Create curves for SS, CLK, MOSI, MISO for each group
-            ss_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=2))
-            clk_curve = self.plot.plot(pen=pg.mkPen(color='#DEDEDE', width=2))
-            mosi_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=2))
-            miso_curve = self.plot.plot(pen=pg.mkPen(color=self.colors[(group_idx+1) % len(self.colors)], width=2))
-            ss_curve.setVisible(False)
-            clk_curve.setVisible(False)
-            mosi_curve.setVisible(False)
-            miso_curve.setVisible(False)
-            self.group_curves.append({'ss_curve': ss_curve, 'clk_curve': clk_curve, 'mosi_curve': mosi_curve, 'miso_curve': miso_curve})
 
         button_layout = QGridLayout()
         plot_layout.addLayout(button_layout, stretch=1)  # Allocate less space to the control panel
@@ -627,7 +614,13 @@ class SPIDisplay(QWidget):
 
         # Initialize other components
         self.channel_visibility = [False] * self.channels
-        
+
+    def is_light_color(self, hex_color):
+        hex_color = hex_color.lstrip('#')
+        r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return luminance > 0.5
+
     def reset_group_to_default(self, group_idx):
         # Reset the group configuration to default settings
         default_config = self.default_group_configs[group_idx].copy()
@@ -638,27 +631,32 @@ class SPIDisplay(QWidget):
         self.channel_buttons[group_idx].setText(self.channel_buttons[group_idx].default_label)
 
         # Update trigger mode buttons
-        sda_channel = default_config['data_channel']
-        scl_channel = default_config['clock_channel']
-        sda_idx = sda_channel - 1
-        scl_idx = scl_channel - 1
+        ss_channel = default_config['ss_channel']
+        clk_channel = default_config['clock_channel']
+        ss_idx = ss_channel - 1
+        clk_idx = clk_channel - 1
 
-        self.current_trigger_modes[sda_idx] = 'No Trigger'
-        self.current_trigger_modes[scl_idx] = 'No Trigger'
-        self.sda_trigger_mode_buttons[group_idx].setText(f"SDA - {self.current_trigger_modes[sda_idx]}")
-        self.scl_trigger_mode_buttons[group_idx].setText(f"SCL - {self.current_trigger_modes[scl_idx]}")
+        self.current_trigger_modes[ss_idx] = 'No Trigger'
+        self.current_trigger_modes[clk_idx] = 'No Trigger'
+        self.ss_trigger_mode_buttons[group_idx].setText(f"SS - {self.current_trigger_modes[ss_idx]}")
+        self.clk_trigger_mode_buttons[group_idx].setText(f"SCLK - {self.current_trigger_modes[clk_idx]}")
 
         # Update worker's group configurations
         self.worker.group_configs[group_idx] = default_config
 
         # Update curves visibility and colors
-        is_checked = self.i2c_group_enabled[group_idx]
-        sda_curve = self.group_curves[group_idx]['sda_curve']
-        scl_curve = self.group_curves[group_idx]['scl_curve']
-        sda_curve.setVisible(is_checked)
-        scl_curve.setVisible(is_checked)
-        sda_curve.setPen(pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=4))
-        scl_curve.setPen(pg.mkPen(color='#DEDEDE', width=4))
+        is_checked = self.spi_group_enabled[group_idx]
+        curves = self.group_curves[group_idx]
+        ss_curve = curves['ss_curve']
+        clk_curve = curves['clk_curve']
+        mosi_curve = curves['mosi_curve']
+        miso_curve = curves['miso_curve']
+        ss_curve.setVisible(is_checked)
+        clk_curve.setVisible(is_checked)
+        mosi_curve.setVisible(is_checked)
+        miso_curve.setVisible(is_checked)
+        mosi_curve.setPen(pg.mkPen(color=self.colors[group_idx % len(self.colors)], width=2))
+        miso_curve.setPen(pg.mkPen(color=self.colors[(group_idx + 1) % len(self.colors)], width=2))
 
         # Clear data buffers
         self.clear_data_buffers()
@@ -667,7 +665,6 @@ class SPIDisplay(QWidget):
         self.channel_buttons[group_idx].setStyleSheet("")
 
         print(f"Group {group_idx+1} has been reset to default settings.")
-
 
     def handle_sample_rate_input(self):
         try:
@@ -778,12 +775,12 @@ class SPIDisplay(QWidget):
 
     def toggle_trigger_mode(self, group_idx, line):
         group_config = self.group_configs[group_idx]
-        if line == 'SDA':
-            channel_idx = group_config['data_channel'] - 1  # Adjust index
-            button = self.sda_trigger_mode_buttons[group_idx]
-        elif line == 'SCL':
+        if line == 'SS':
+            channel_idx = group_config['ss_channel'] - 1  # Adjust index
+            button = self.ss_trigger_mode_buttons[group_idx]
+        elif line == 'CLK':
             channel_idx = group_config['clock_channel'] - 1  # Adjust index
-            button = self.scl_trigger_mode_buttons[group_idx]
+            button = self.clk_trigger_mode_buttons[group_idx]
         else:
             return
 
@@ -798,32 +795,29 @@ class SPIDisplay(QWidget):
         self.send_trigger_edge_command()
         self.send_trigger_pins_command()
 
-
-    def is_light_color(self, hex_color):
-        hex_color = hex_color.lstrip('#')
-        r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-        return luminance > 0.5
-    
     def toggle_channel_group(self, group_idx, is_checked):
-        self.i2c_group_enabled[group_idx] = is_checked  # Update the enabled list
+        self.spi_group_enabled[group_idx] = is_checked  # Update the enabled list
 
         # Update curves visibility
-        sda_curve = self.group_curves[group_idx]['sda_curve']
-        scl_curve = self.group_curves[group_idx]['scl_curve']
-        sda_curve.setVisible(is_checked)
-        scl_curve.setVisible(is_checked)
+        curves = self.group_curves[group_idx]
+        ss_curve = curves['ss_curve']
+        clk_curve = curves['clk_curve']
+        mosi_curve = curves['mosi_curve']
+        miso_curve = curves['miso_curve']
+        ss_curve.setVisible(is_checked)
+        clk_curve.setVisible(is_checked)
+        mosi_curve.setVisible(is_checked)
+        miso_curve.setVisible(is_checked)
 
         button = self.channel_buttons[group_idx]
         if is_checked:
             color = self.colors[group_idx % len(self.colors)]
             text_color = 'black' if self.is_light_color(color) else 'white'
             button.setStyleSheet(f"QPushButton {{ background-color: {color}; color: {text_color}; "
-                                 f"border: 1px solid #555; border-radius: 5px; padding: 5px; "
-                                 f"text-align: left; }}")
+                                f"border: 1px solid #555; border-radius: 5px; padding: 5px; "
+                                f"text-align: left; }}")
         else:
             button.setStyleSheet("")
-
 
     def toggle_reading(self):
         if self.is_reading:
@@ -902,7 +896,7 @@ class SPIDisplay(QWidget):
         self.total_samples = 0  # Reset total samples
 
         # Remove all cursors
-        for group_idx in range(4):
+        for group_idx in range(2):
             for cursor_info in self.group_cursors[group_idx]:
                 self.plot.removeItem(cursor_info['line'])
                 self.plot.removeItem(cursor_info['label'])
@@ -910,7 +904,6 @@ class SPIDisplay(QWidget):
 
         # Reset worker's decoding states
         self.worker.reset_decoding_states()
-
 
     def handle_data_value(self, data_value):
         if self.is_reading:
@@ -929,7 +922,7 @@ class SPIDisplay(QWidget):
                     # In continuous mode, reset buffers and cursors
                     self.clear_data_buffers()
                     self.clear_decoded_text()
-                    
+
     def display_decoded_message(self, decoded_data):
         group_idx = decoded_data['group_idx']
         if not self.spi_group_enabled[group_idx]:
@@ -948,13 +941,13 @@ class SPIDisplay(QWidget):
                 label_text += f"MISO: {data_miso}"
             if label_text:
                 self.create_cursor(group_idx, sample_idx, label_text)
-                
+
     def create_cursor(self, group_idx, sample_idx, label_text):
         # Get base level for this group
-        base_level = (4 - group_idx - 1) * 4  # Adjust as needed
-        # Cursor color (keeping your tweaks)
+        base_level = (2 - group_idx - 1) * 6  # Adjust as needed
+        # Cursor color
         cursor_color = '#00F5FF'  # Use your preferred color
-        # Create a vertical line segment between SDA and SCL levels
+        # Create a vertical line segment between SS and CLK levels
         y1 = base_level + 1
         y2 = base_level + 2
         x = 0  # Initial x position, will be updated in update_plot
@@ -976,60 +969,92 @@ class SPIDisplay(QWidget):
             'y2': y2
         })
 
-
     def clear_decoded_text(self):
         # Clear all decoded text boxes and messages per group
-        for idx, text_edit in enumerate(self.decoded_texts):
+        for idx in range(2):
             self.decoded_messages_per_group[idx] = []
         # Cursors are already cleared in clear_data_buffers
 
     def update_plot(self):
-        for group_idx, is_enabled in enumerate(self.i2c_group_enabled):
+        for group_idx, is_enabled in enumerate(self.spi_group_enabled):
             if is_enabled:
                 group_config = self.group_configs[group_idx]
-                sda_channel = group_config['data_channel'] - 1  # Adjust index
-                scl_channel = group_config['clock_channel'] - 1  # Adjust index
+                ss_channel = group_config['ss_channel'] - 1  # Adjust index
+                clk_channel = group_config['clock_channel'] - 1  # Adjust index
+                mosi_channel = group_config['mosi_channel'] - 1  # Adjust index
+                miso_channel = group_config['miso_channel'] - 1  # Adjust index
 
                 # Get the curves for this group
-                sda_curve = self.group_curves[group_idx]['sda_curve']
-                scl_curve = self.group_curves[group_idx]['scl_curve']
+                curves = self.group_curves[group_idx]
+                ss_curve = curves['ss_curve']
+                clk_curve = curves['clk_curve']
+                mosi_curve = curves['mosi_curve']
+                miso_curve = curves['miso_curve']
 
                 # Prepare data for plotting
-                sda_data = list(self.data_buffer[sda_channel])
-                scl_data = list(self.data_buffer[scl_channel])
+                ss_data = list(self.data_buffer[ss_channel])
+                clk_data = list(self.data_buffer[clk_channel])
+                mosi_data = list(self.data_buffer[mosi_channel])
+                miso_data = list(self.data_buffer[miso_channel])
 
-                num_samples = len(sda_data)
+                num_samples = len(ss_data)
                 if num_samples > 1:
                     t = np.arange(num_samples) / self.sample_rate
 
                     # Offset per group to separate the signals vertically
-                    base_level = (4 - group_idx - 1) * 4  # Adjust as needed
+                    base_level = (2 - group_idx - 1) * 6  # Adjust as needed
 
-                    # --- Plot SDA Signal ---
-                    sda_square_wave_time = []
-                    sda_square_wave_data = []
+                    # --- Plot SS Signal ---
+                    ss_square_wave_time = []
+                    ss_square_wave_data = []
                     for j in range(1, num_samples):
-                        sda_square_wave_time.extend([t[j - 1], t[j]])
-                        level = sda_data[j - 1] + base_level
-                        sda_square_wave_data.extend([level, level])
-                        if sda_data[j] != sda_data[j - 1]:
-                            sda_square_wave_time.append(t[j])
-                            level = sda_data[j] + base_level
-                            sda_square_wave_data.append(level)
-                    sda_curve.setData(sda_square_wave_time, sda_square_wave_data)
+                        ss_square_wave_time.extend([t[j - 1], t[j]])
+                        level = ss_data[j - 1] + base_level
+                        ss_square_wave_data.extend([level, level])
+                        if ss_data[j] != ss_data[j - 1]:
+                            ss_square_wave_time.append(t[j])
+                            level = ss_data[j] + base_level
+                            ss_square_wave_data.append(level)
+                    ss_curve.setData(ss_square_wave_time, ss_square_wave_data)
 
-                    # --- Plot SCL Signal ---
-                    scl_square_wave_time = []
-                    scl_square_wave_data = []
+                    # --- Plot CLK Signal ---
+                    clk_square_wave_time = []
+                    clk_square_wave_data = []
                     for j in range(1, num_samples):
-                        scl_square_wave_time.extend([t[j - 1], t[j]])
-                        level = scl_data[j - 1] + base_level + 2  # Offset by 2 to separate from SDA
-                        scl_square_wave_data.extend([level, level])
-                        if scl_data[j] != scl_data[j - 1]:
-                            scl_square_wave_time.append(t[j])
-                            level = scl_data[j] + base_level + 2
-                            scl_square_wave_data.append(level)
-                    scl_curve.setData(scl_square_wave_time, scl_square_wave_data)
+                        clk_square_wave_time.extend([t[j - 1], t[j]])
+                        level = clk_data[j - 1] + base_level + 1.5
+                        clk_square_wave_data.extend([level, level])
+                        if clk_data[j] != clk_data[j - 1]:
+                            clk_square_wave_time.append(t[j])
+                            level = clk_data[j] + base_level + 1.5
+                            clk_square_wave_data.append(level)
+                    clk_curve.setData(clk_square_wave_time, clk_square_wave_data)
+
+                    # --- Plot MOSI Signal ---
+                    mosi_square_wave_time = []
+                    mosi_square_wave_data = []
+                    for j in range(1, num_samples):
+                        mosi_square_wave_time.extend([t[j - 1], t[j]])
+                        level = mosi_data[j - 1] + base_level + 3
+                        mosi_square_wave_data.extend([level, level])
+                        if mosi_data[j] != mosi_data[j - 1]:
+                            mosi_square_wave_time.append(t[j])
+                            level = mosi_data[j] + base_level + 3
+                            mosi_square_wave_data.append(level)
+                    mosi_curve.setData(mosi_square_wave_time, mosi_square_wave_data)
+
+                    # --- Plot MISO Signal ---
+                    miso_square_wave_time = []
+                    miso_square_wave_data = []
+                    for j in range(1, num_samples):
+                        miso_square_wave_time.extend([t[j - 1], t[j]])
+                        level = miso_data[j - 1] + base_level + 4.5
+                        miso_square_wave_data.extend([level, level])
+                        if miso_data[j] != miso_data[j - 1]:
+                            miso_square_wave_time.append(t[j])
+                            level = miso_data[j] + base_level + 4.5
+                            miso_square_wave_data.append(level)
+                    miso_curve.setData(miso_square_wave_time, miso_square_wave_data)
 
                     # --- Update Cursors ---
                     cursors_to_remove = []
@@ -1084,13 +1109,17 @@ class SPIDisplay(QWidget):
                                 last_label_x = x_pos
                 else:
                     # Clear the curves if no data
-                    sda_curve.setData([], [])
-                    scl_curve.setData([], [])
+                    curves['ss_curve'].setData([], [])
+                    curves['clk_curve'].setData([], [])
+                    curves['mosi_curve'].setData([], [])
+                    curves['miso_curve'].setData([], [])
             else:
                 # If group is not enabled, hide curves
-                self.group_curves[group_idx]['sda_curve'].setVisible(False)
-                self.group_curves[group_idx]['scl_curve'].setVisible(False)
-
+                curves = self.group_curves[group_idx]
+                curves['ss_curve'].setVisible(False)
+                curves['clk_curve'].setVisible(False)
+                curves['mosi_curve'].setVisible(False)
+                curves['miso_curve'].setVisible(False)
 
     def closeEvent(self, event):
         self.worker.stop_worker()
@@ -1106,20 +1135,28 @@ class SPIDisplay(QWidget):
             self.group_configs[group_idx] = new_config
             print(f"Configuration for group {group_idx+1} updated: {new_config}")
             # Update labels on the button to reflect new channel assignments
-            sda_channel = new_config['data_channel']
-            scl_channel = new_config['clock_channel']
-            label = f"I2C {group_idx+1}\nCh{sda_channel}:SDA\nCh{scl_channel}:SCL"
+            ss_channel = new_config['ss_channel']
+            clk_channel = new_config['clock_channel']
+            mosi_channel = new_config['mosi_channel']
+            miso_channel = new_config['miso_channel']
+            label = f"SPI {group_idx+1}\nCh{ss_channel}:SS\nCh{clk_channel}:SCLK\nCh{mosi_channel}:MOSI\nCh{miso_channel}:MISO"
             self.channel_buttons[group_idx].setText(label)
             # Update trigger mode buttons
-            self.sda_trigger_mode_buttons[group_idx].setText(f"SDA - {self.current_trigger_modes[sda_channel - 1]}")
-            self.scl_trigger_mode_buttons[group_idx].setText(f"SCL - {self.current_trigger_modes[scl_channel - 1]}")
+            self.ss_trigger_mode_buttons[group_idx].setText(f"SS - {self.current_trigger_modes[ss_channel - 1]}")
+            self.clk_trigger_mode_buttons[group_idx].setText(f"SCLK - {self.current_trigger_modes[clk_channel - 1]}")
             # Update curves visibility
-            is_checked = self.i2c_group_enabled[group_idx]
-            sda_curve = self.group_curves[group_idx]['sda_curve']
-            scl_curve = self.group_curves[group_idx]['scl_curve']
-            sda_curve.setVisible(is_checked)
-            scl_curve.setVisible(is_checked)
+            is_checked = self.spi_group_enabled[group_idx]
+            curves = self.group_curves[group_idx]
+            ss_curve = curves['ss_curve']
+            clk_curve = curves['clk_curve']
+            mosi_curve = curves['mosi_curve']
+            miso_curve = curves['miso_curve']
+            ss_curve.setVisible(is_checked)
+            clk_curve.setVisible(is_checked)
+            mosi_curve.setVisible(is_checked)
+            miso_curve.setVisible(is_checked)
             # Clear data buffers
             self.clear_data_buffers()
             # Update worker's group configurations
             self.worker.group_configs = self.group_configs
+
