@@ -1,5 +1,3 @@
-# SPI.py
-
 import sys
 import serial
 import math
@@ -211,7 +209,7 @@ class SerialWorker(QThread):
         self.is_running = False
         if self.serial.is_open:
             self.serial.close()
-            
+
 class FixedYViewBox(pg.ViewBox):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -241,7 +239,7 @@ class FixedYViewBox(pg.ViewBox):
             else:
                 x = t
         super().translateBy(x=x, y=y)
-        
+
 class EditableButton(QPushButton):
     def __init__(self, label, parent=None):
         super().__init__(label, parent)
@@ -262,7 +260,7 @@ class EditableButton(QPushButton):
                 self.setText(new_label)
         elif action == reset_action:
             self.setText(self.default_label)
-            
+
 class SPIChannelButton(EditableButton):
     configure_requested = pyqtSignal(int)  # Signal to notify when configure is requested
     reset_requested = pyqtSignal(int)      # New signal for reset
@@ -419,7 +417,7 @@ class SPIConfigDialog(QDialog):
             'first_bit': 'MSB' if self.first_msb.isChecked() else 'LSB',
             'data_format': self.format_combo.currentText(),
         }
-        
+
 class SPIDisplay(QWidget):
     def __init__(self, port, baudrate, bufferSize, channels=8):
         super().__init__()
@@ -496,10 +494,11 @@ class SPIDisplay(QWidget):
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
-        self.plot.setXRange(0, self.bufferSize / self.sample_rate, padding=0)
+        # Adjusted Y-range to better utilize the plotting area
+        total_signals = 8  # 2 groups * 4 signals per group
+        signal_spacing = 1.5
+        self.plot.setYRange(-2, total_signals * signal_spacing + 2, padding=0)
         self.plot.setLimits(xMin=0, xMax=self.bufferSize / self.sample_rate)
-        self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
-        self.plot.setYRange(-2, 2 * self.channels, padding=0)  # Adjust as needed
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
@@ -922,6 +921,13 @@ class SPIDisplay(QWidget):
                     # In continuous mode, reset buffers and cursors
                     self.clear_data_buffers()
                     self.clear_decoded_text()
+    
+    def clear_decoded_text(self):
+        # Clear all decoded messages per group
+        for idx in range(len(self.group_configs)):
+            self.decoded_messages_per_group[idx] = []
+        # Cursors are already cleared in clear_data_buffers
+
 
     def display_decoded_message(self, decoded_data):
         group_idx = decoded_data['group_idx']
@@ -934,48 +940,65 @@ class SPIDisplay(QWidget):
         if event == 'DATA':
             data_mosi = decoded_data.get('data_mosi', '')
             data_miso = decoded_data.get('data_miso', '')
-            label_text = ''
             if data_mosi:
-                label_text += f"MOSI: {data_mosi} "
+                label_text_mosi = f"MOSI: {data_mosi}"
+                self.create_cursor(group_idx, sample_idx, label_text_mosi, signal='MOSI')
             if data_miso:
-                label_text += f"MISO: {data_miso}"
-            if label_text:
-                self.create_cursor(group_idx, sample_idx, label_text)
+                label_text_miso = f"MISO: {data_miso}"
+                self.create_cursor(group_idx, sample_idx, label_text_miso, signal='MISO')
 
-    def create_cursor(self, group_idx, sample_idx, label_text):
-        # Get base level for this group
-        base_level = (2 - group_idx - 1) * 6  # Adjust as needed
+
+    def create_cursor(self, group_idx, sample_idx, label_text, signal):
         # Cursor color
         cursor_color = '#00F5FF'  # Use your preferred color
-        # Create a vertical line segment between SS and CLK levels
-        y1 = base_level + 1
-        y2 = base_level + 2
+
+        # Signals per group: SS, CLK, MOSI, MISO
+        signals_per_group = 4
+        total_groups = len(self.spi_group_enabled)
+        total_signals = total_groups * signals_per_group
+        signal_spacing = 1.5
+
+        # Determine the y-position based on the signal
+        if signal == 'MOSI':
+            signal_index = group_idx * signals_per_group + 2  # MOSI
+            label_offset_y = -0.5  # Position label below the signal
+            label_anchor = (0.5, 1.0)  # Anchor at the top center of the label
+        elif signal == 'MISO':
+            signal_index = group_idx * signals_per_group + 3  # MISO
+            label_offset_y = -0.5  # Position label below the signal
+            label_anchor = (0.5, 1.0)  # Anchor at the top center of the label
+        else:
+            return  # Invalid signal, do nothing
+
+        # Calculate y-position for the cursor
+        y_position = (total_signals - signal_index - 1) * signal_spacing
+
         x = 0  # Initial x position, will be updated in update_plot
+
         # Create line data
-        line = pg.PlotDataItem([x, x], [y1, y2], pen=pg.mkPen(color=cursor_color, width=2))
+        line = pg.PlotDataItem([x, x], [y_position, y_position + 1], pen=pg.mkPen(color=cursor_color, width=2))
         self.plot.addItem(line)
         # Add a label
-        label = pg.TextItem(text=label_text, anchor=(0.1, 0.5), color=cursor_color)
+        label = pg.TextItem(text=label_text, anchor=label_anchor, color=cursor_color)
         font = QFont("Arial", 12)
         label.setFont(font)
         self.plot.addItem(label)
-        # Store the line, label, and sample index
+        # Store the line, label, sample index, and label offset
         self.group_cursors[group_idx].append({
             'line': line,
             'label': label,
             'sample_idx': sample_idx,
-            'base_level': base_level,
-            'y1': y1,
-            'y2': y2
+            'y_position': y_position,
+            'label_offset_y': label_offset_y
         })
 
-    def clear_decoded_text(self):
-        # Clear all decoded text boxes and messages per group
-        for idx in range(2):
-            self.decoded_messages_per_group[idx] = []
-        # Cursors are already cleared in clear_data_buffers
 
     def update_plot(self):
+        signals_per_group = 4
+        total_groups = len(self.spi_group_enabled)
+        total_signals = total_groups * signals_per_group
+        signal_spacing = 1.5
+
         for group_idx, is_enabled in enumerate(self.spi_group_enabled):
             if is_enabled:
                 group_config = self.group_configs[group_idx]
@@ -1001,58 +1024,63 @@ class SPIDisplay(QWidget):
                 if num_samples > 1:
                     t = np.arange(num_samples) / self.sample_rate
 
-                    # Offset per group to separate the signals vertically
-                    base_level = (2 - group_idx - 1) * 6  # Adjust as needed
-
                     # --- Plot SS Signal ---
+                    signal_index = group_idx * signals_per_group + 0  # SS
+                    level_offset = (total_signals - signal_index - 1) * signal_spacing
                     ss_square_wave_time = []
                     ss_square_wave_data = []
                     for j in range(1, num_samples):
                         ss_square_wave_time.extend([t[j - 1], t[j]])
-                        level = ss_data[j - 1] + base_level
+                        level = ss_data[j - 1] + level_offset
                         ss_square_wave_data.extend([level, level])
                         if ss_data[j] != ss_data[j - 1]:
                             ss_square_wave_time.append(t[j])
-                            level = ss_data[j] + base_level
+                            level = ss_data[j] + level_offset
                             ss_square_wave_data.append(level)
                     ss_curve.setData(ss_square_wave_time, ss_square_wave_data)
 
                     # --- Plot CLK Signal ---
+                    signal_index = group_idx * signals_per_group + 1  # CLK
+                    level_offset = (total_signals - signal_index - 1) * signal_spacing
                     clk_square_wave_time = []
                     clk_square_wave_data = []
                     for j in range(1, num_samples):
                         clk_square_wave_time.extend([t[j - 1], t[j]])
-                        level = clk_data[j - 1] + base_level + 1.5
+                        level = clk_data[j - 1] + level_offset
                         clk_square_wave_data.extend([level, level])
                         if clk_data[j] != clk_data[j - 1]:
                             clk_square_wave_time.append(t[j])
-                            level = clk_data[j] + base_level + 1.5
+                            level = clk_data[j] + level_offset
                             clk_square_wave_data.append(level)
                     clk_curve.setData(clk_square_wave_time, clk_square_wave_data)
 
                     # --- Plot MOSI Signal ---
+                    signal_index = group_idx * signals_per_group + 2  # MOSI
+                    level_offset = (total_signals - signal_index - 1) * signal_spacing
                     mosi_square_wave_time = []
                     mosi_square_wave_data = []
                     for j in range(1, num_samples):
                         mosi_square_wave_time.extend([t[j - 1], t[j]])
-                        level = mosi_data[j - 1] + base_level + 3
+                        level = mosi_data[j - 1] + level_offset
                         mosi_square_wave_data.extend([level, level])
                         if mosi_data[j] != mosi_data[j - 1]:
                             mosi_square_wave_time.append(t[j])
-                            level = mosi_data[j] + base_level + 3
+                            level = mosi_data[j] + level_offset
                             mosi_square_wave_data.append(level)
                     mosi_curve.setData(mosi_square_wave_time, mosi_square_wave_data)
 
                     # --- Plot MISO Signal ---
+                    signal_index = group_idx * signals_per_group + 3  # MISO
+                    level_offset = (total_signals - signal_index - 1) * signal_spacing
                     miso_square_wave_time = []
                     miso_square_wave_data = []
                     for j in range(1, num_samples):
                         miso_square_wave_time.extend([t[j - 1], t[j]])
-                        level = miso_data[j - 1] + base_level + 4.5
+                        level = miso_data[j - 1] + level_offset
                         miso_square_wave_data.extend([level, level])
                         if miso_data[j] != miso_data[j - 1]:
                             miso_square_wave_time.append(t[j])
-                            level = miso_data[j] + base_level + 4.5
+                            level = miso_data[j] + level_offset
                             miso_square_wave_data.append(level)
                     miso_curve.setData(miso_square_wave_time, miso_square_wave_data)
 
@@ -1065,12 +1093,11 @@ class SPIDisplay(QWidget):
                             cursor_time = t[int(idx_in_buffer)]
                             # Update the line position
                             x = cursor_time
-                            y1 = cursor_info['y1']
-                            y2 = cursor_info['y2']
-                            cursor_info['line'].setData([x, x], [y1, y2])
+                            y_position = cursor_info['y_position']
+                            cursor_info['line'].setData([x, x], [y_position - 1, y_position + 1])
                             # Update the label position
                             label_offset = (t[1] - t[0]) * 5  # Adjust label offset as needed
-                            cursor_info['label'].setPos(x + label_offset, (y1 + y2) / 2)
+                            cursor_info['label'].setPos(x + label_offset, y_position + 0.7)
                             cursor_info['x_pos'] = x + label_offset  # Store x position for overlap checking
                         else:
                             # Cursor is no longer in the buffer, remove it
@@ -1082,31 +1109,36 @@ class SPIDisplay(QWidget):
                         self.group_cursors[group_idx].remove(cursor_info)
 
                     # --- Hide Overlapping Labels ---
-                    # Collect labels and their x positions
+                    # Collect labels and their positions
                     labels_with_positions = []
                     for cursor_info in self.group_cursors[group_idx]:
                         label = cursor_info['label']
                         x_pos = cursor_info.get('x_pos', None)
-                        if x_pos is not None:
-                            labels_with_positions.append((x_pos, label))
+                        y_pos = cursor_info.get('y_pos', None)
+                        if x_pos is not None and y_pos is not None:
+                            labels_with_positions.append((x_pos, y_pos, label))
 
-                    # Sort labels by x position
-                    labels_with_positions.sort(key=lambda item: item[0])
+                    # Sort labels by x and y positions
+                    labels_with_positions.sort(key=lambda item: (item[0], item[1]))
 
-                    # Hide labels that overlap
-                    min_label_spacing = (t[1] - t[0]) * 10  # Adjust as needed
-                    last_label_x = None
-                    for x_pos, label in labels_with_positions:
+                    # Hide labels that overlap in both x and y
+                    min_label_spacing_x = (t[1] - t[0]) * 10  # Adjust as needed
+                    min_label_spacing_y = signal_spacing * 0.5  # Adjust as needed
+                    last_label_x = last_label_y = None
+                    for x_pos, y_pos, label in labels_with_positions:
                         if last_label_x is None:
                             label.setVisible(True)
                             last_label_x = x_pos
+                            last_label_y = y_pos
                         else:
-                            if x_pos - last_label_x < min_label_spacing:
-                                # Labels are too close, hide this label
+                            if abs(x_pos - last_label_x) < min_label_spacing_x and abs(y_pos - last_label_y) < min_label_spacing_y:
+                                # Labels are too close in both x and y, hide this label
                                 label.setVisible(False)
                             else:
                                 label.setVisible(True)
                                 last_label_x = x_pos
+                                last_label_y = y_pos
+
                 else:
                     # Clear the curves if no data
                     curves['ss_curve'].setData([], [])
@@ -1159,4 +1191,3 @@ class SPIDisplay(QWidget):
             self.clear_data_buffers()
             # Update worker's group configurations
             self.worker.group_configs = self.group_configs
-
