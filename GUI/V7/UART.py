@@ -1,3 +1,5 @@
+# UART.py
+
 import sys
 import serial
 import math
@@ -16,11 +18,9 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QComboBox,
     QDialog,
-    QRadioButton,
-    QButtonGroup,
     QSizePolicy,
 )
-from PyQt6.QtGui import QIcon, QIntValidator, QFont
+from PyQt6.QtGui import QFont, QIntValidator
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt
 from collections import deque
 from InterfaceCommands import (
@@ -30,7 +30,7 @@ from InterfaceCommands import (
 from aesthetic import get_icon
 
 
-class SerialWorker(QThread):
+class UARTWorker(QThread):
     data_ready = pyqtSignal(int, int)  # For raw data values and sample indices
     decoded_message_ready = pyqtSignal(dict)  # For decoded messages
 
@@ -38,9 +38,22 @@ class SerialWorker(QThread):
         super().__init__()
         self.is_running = True
         self.channels = channels
-        self.uart_configs = uart_configs if uart_configs else [{} for _ in range(8)]
-        self.current_trigger_modes = ['No Trigger'] * self.channels
+        self.uart_configs = uart_configs if uart_configs else [{} for _ in range(channels)]
+        self.trigger_modes = ['No Trigger'] * self.channels
+        # Initialize UART decoding variables for each channel
         self.sample_idx = 0  # Initialize sample index
+        self.states = ['IDLE'] * self.channels
+        self.bit_counts = [0] * self.channels
+        self.current_bytes = [0] * self.channels
+        self.last_transition_times = [0] * self.channels
+        self.decoded_messages = [[] for _ in range(self.channels)]
+        self.sample_rates = [0] * self.channels  # Sample rate per channel, derived from baud rate
+        self.baud_rates = [9600] * self.channels  # Default baud rate
+        self.bit_timing_error = [0.0] * self.channels  # For fractional bit timing
+        self.start_bits_detected = [False] * self.channels  # For start bit detection
+        self.next_sample_times = [0.0] * self.channels  # Initialize next_sample_times per channel
+        self.last_bits = [1] * self.channels  # For edge detection
+        self.stop_bit_counters = [0] * self.channels  # Initialize stop_bit_counters per channel
 
         try:
             self.serial = serial.Serial(port, baudrate)
@@ -48,16 +61,14 @@ class SerialWorker(QThread):
             print(f"Failed to open serial port: {str(e)}")
             self.is_running = False
 
-        # Initialize UART decoding variables for each channel
-        self.states = ['IDLE'] * self.channels
-        self.data_buffers = [deque(maxlen=16 * 10) for _ in range(self.channels)]
-        self.start_bit_samples = [[] for _ in range(self.channels)]
-        self.sample_counters = [0] * self.channels
-        self.current_bytes = [0] * self.channels
-        self.bit_indices = [0] * self.channels
-
     def set_trigger_mode(self, channel_idx, mode):
-        self.current_trigger_modes[channel_idx] = mode
+        self.trigger_modes[channel_idx] = mode
+
+    def set_baud_rate(self, channel_idx, baud_rate):
+        self.baud_rates[channel_idx] = baud_rate
+
+    def set_sample_rate(self, channel_idx, sample_rate):
+        self.sample_rates[channel_idx] = sample_rate
 
     def run(self):
         data_buffer = deque(maxlen=1000)
@@ -76,98 +87,208 @@ class SerialWorker(QThread):
                         continue
 
     def decode_uart(self, data_value, sample_idx):
-        for idx, uart_config in enumerate(self.uart_configs):
+        for ch in range(self.channels):
+            # Only decode if the channel is enabled
+            uart_config = self.uart_configs[ch]
             if not uart_config.get('enabled', False):
-                continue  # Skip if UART channel is not enabled
+                continue
 
-            channel_idx = uart_config['data_channel'] - 1
+            # Get the bit for this channel
+            data_channel = uart_config.get('data_channel', ch + 1) - 1  # Adjust for zero-based index
+            bit = (data_value >> data_channel) & 1
+
+            # Apply polarity
             polarity = uart_config.get('polarity', 'Standard')
-            stop_bits = uart_config.get('stop_bits', 1)
-            data_format = uart_config.get('data_format', 'Hexadecimal')
-
-            # Extract the data bit
-            data_bit = (data_value >> channel_idx) & 1
             if polarity == 'Inverted':
-                data_bit = 1 - data_bit
+                bit = 1 - bit
 
-            self.data_buffers[idx].append(data_bit)
+            # Get sample rate and baud rate
+            sample_rate = uart_config.get('sample_rate', None)
+            baud_rate = uart_config.get('baud_rate', 9600)
+            if sample_rate is None or baud_rate == 0:
+                continue  # Cannot decode without sample rate and baud rate
 
-            # UART decoding state machine
-            if self.states[idx] == 'IDLE':
-                if data_bit == 0:
-                    # Potential start bit detected
-                    self.start_bit_samples[idx] = [data_bit]
-                    self.states[idx] = 'START_BIT'
-                    self.sample_counters[idx] = 1
-            elif self.states[idx] == 'START_BIT':
-                self.start_bit_samples[idx].append(data_bit)
-                self.sample_counters[idx] += 1
-                if self.sample_counters[idx] >= 16:
-                    # Check if majority of samples indicate a valid start bit
-                    if sum(self.start_bit_samples[idx][7:10]) <= 1:
-                        # Valid start bit
-                        self.states[idx] = 'DATA_BITS'
-                        self.sample_counters[idx] = 0
-                        self.current_bytes[idx] = 0
-                        self.bit_indices[idx] = 0
+            # Calculate number of samples per bit
+            samples_per_bit = sample_rate / baud_rate
+
+            # State machine for UART decoding
+            state = self.states[ch]
+            bit_count = self.bit_counts[ch]
+            current_byte = self.current_bytes[ch]
+            next_sample_time = self.next_sample_times[ch]
+            stop_bits = uart_config.get('stop_bits', 1)
+            data_format = uart_config.get('data_format', 'ASCII')
+            stop_bit_counter = self.stop_bit_counters[ch]  # Retrieve stop_bit_counter
+            last_bit = self.last_bits[ch]
+
+            if state == 'IDLE':
+                if bit == 0 and last_bit == 1:
+                    # Start bit detected (falling edge)
+                    state = 'START_BIT'
+                    bit_count = 0
+                    current_byte = 0
+                    next_sample_time = sample_idx + samples_per_bit * 1.5  # Sample in the middle of first data bit
+            elif state == 'START_BIT':
+                # Wait for first data bit
+                if sample_idx >= next_sample_time - samples_per_bit:
+                    state = 'DATA_BITS'
+            elif state == 'DATA_BITS':
+                if sample_idx >= next_sample_time:
+                    # Sample data bit
+                    current_byte |= (bit << bit_count)
+                    bit_count += 1
+                    next_sample_time += samples_per_bit  # Schedule next bit sample time
+                    if bit_count >= 8:
+                        state = 'STOP_BITS'
+                        stop_bit_counter = 0  # Initialize stop_bit_counter
+            elif state == 'STOP_BITS':
+                if sample_idx >= next_sample_time:
+                    # Sample stop bit
+                    if bit == 1:
+                        # Valid stop bit
+                        stop_bit_counter += 1
+                        next_sample_time += samples_per_bit
+                        if stop_bit_counter >= stop_bits:
+                            # Byte is complete
+                            # Emit decoded byte
+                            self.decoded_message_ready.emit({
+                                'channel': ch,
+                                'data': current_byte,
+                                'sample_idx': sample_idx,
+                                'data_format': data_format,
+                            })
+                            state = 'IDLE'
                     else:
-                        # False start bit detected
-                        self.states[idx] = 'IDLE'
-            elif self.states[idx] == 'DATA_BITS':
-                self.sample_counters[idx] += 1
-                if self.sample_counters[idx] % 16 == 0:
-                    # Sample the data bit
-                    bit_samples = list(self.data_buffers[idx])[-16:]
-                    bit_value = 1 if sum(bit_samples[7:10]) >= 2 else 0
-                    self.current_bytes[idx] |= (bit_value << self.bit_indices[idx])
-                    self.bit_indices[idx] += 1
-                    if self.bit_indices[idx] >= 8:
-                        self.states[idx] = 'STOP_BITS'
-                        self.bit_indices[idx] = 0
-                        self.sample_counters[idx] = 0
-                        # Emit the decoded byte
-                        self.emit_decoded_data(idx, self.current_bytes[idx], sample_idx, data_format)
-            elif self.states[idx] == 'STOP_BITS':
-                self.sample_counters[idx] += 1
-                if self.sample_counters[idx] >= 16 * stop_bits:
-                    # Check for valid stop bits if needed
-                    self.states[idx] = 'IDLE'
-                    self.sample_counters[idx] = 0
+                        # Invalid stop bit
+                        state = 'IDLE'
+            else:
+                state = 'IDLE'
 
-    def emit_decoded_data(self, uart_idx, byte_value, sample_idx, data_format):
-        # Format data according to data_format
-        if data_format == 'Binary':
-            data_str = bin(byte_value)
-        elif data_format == 'Decimal':
-            data_str = str(byte_value)
-        elif data_format == 'Hexadecimal':
-            data_str = hex(byte_value)
-        elif data_format == 'ASCII':
-            data_str = chr(byte_value)
-        else:
-            data_str = hex(byte_value)
-
-        # Emit the decoded message
-        self.decoded_message_ready.emit({
-            'uart_idx': uart_idx,
-            'event': 'DATA',
-            'data': data_str,
-            'sample_idx': sample_idx,
-        })
+            # Update states
+            self.states[ch] = state
+            self.bit_counts[ch] = bit_count
+            self.current_bytes[ch] = current_byte
+            self.next_sample_times[ch] = next_sample_time  # Update next_sample_time
+            self.stop_bit_counters[ch] = stop_bit_counter  # Update stop_bit_counter
+            self.last_bits[ch] = bit  # Update last_bit
 
     def reset_decoding_states(self):
-        self.states = ['IDLE'] * self.channels
-        self.data_buffers = [deque(maxlen=16 * 10) for _ in range(self.channels)]
-        self.start_bit_samples = [[] for _ in range(self.channels)]
-        self.sample_counters = [0] * self.channels
-        self.current_bytes = [0] * self.channels
-        self.bit_indices = [0] * self.channels
         self.sample_idx = 0  # Reset sample index
+        self.states = ['IDLE'] * self.channels
+        self.bit_counts = [0] * self.channels
+        self.current_bytes = [0] * self.channels
+        self.next_sample_times = [0.0] * self.channels  # Reset next_sample_times
+        self.decoded_messages = [[] for _ in range(self.channels)]
+        self.stop_bit_counters = [0] * self.channels
+        self.last_bits = [1] * self.channels
+
 
     def stop_worker(self):
         self.is_running = False
         if self.serial.is_open:
             self.serial.close()
+
+
+class UARTChannelButton(QPushButton):
+    configure_requested = pyqtSignal(int)  # Signal to notify when configure is requested
+    reset_requested = pyqtSignal(int)      # New signal for reset
+
+    def __init__(self, label, channel_idx, parent=None):
+        super().__init__(label, parent)
+        self.channel_idx = channel_idx  # Store the index of the UART channel
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
+        self.default_label = label
+
+    def show_context_menu(self, position):
+        menu = QMenu()
+        rename_action = menu.addAction("Rename")
+        reset_action = menu.addAction("Reset to Default")
+        configure_action = menu.addAction("Configure")  # Add the Configure option
+        action = menu.exec(self.mapToGlobal(position))
+        if action == rename_action:
+            new_label, ok = QInputDialog.getText(
+                self, "Rename Button", "Enter new label:", text=self.text()
+            )
+            if ok and new_label:
+                self.setText(new_label)
+        elif action == reset_action:
+            self.setText(self.default_label)
+            self.reset_requested.emit(self.channel_idx)  # Emit reset signal
+        elif action == configure_action:
+            self.configure_requested.emit(self.channel_idx)  # Emit signal to open configuration dialog
+
+
+class UARTConfigDialog(QDialog):
+    def __init__(self, current_config, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("UART Configuration")
+        self.current_config = current_config  # Dictionary to hold current configurations
+
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        # Data Channel Selection
+        data_layout = QHBoxLayout()
+        data_label = QLabel("Data Channel:")
+        self.data_combo = QComboBox()
+        self.data_combo.addItems([f"Channel {i+1}" for i in range(8)])
+        self.data_combo.setCurrentIndex(self.current_config.get('data_channel', 1) - 1)
+        data_layout.addWidget(data_label)
+        data_layout.addWidget(self.data_combo)
+        layout.addLayout(data_layout)
+
+        # Polarity Selection
+        polarity_layout = QHBoxLayout()
+        polarity_label = QLabel("Polarity:")
+        self.polarity_combo = QComboBox()
+        self.polarity_combo.addItems(["Standard", "Inverted"])
+        self.polarity_combo.setCurrentText(self.current_config.get('polarity', 'Standard'))
+        polarity_layout.addWidget(polarity_label)
+        polarity_layout.addWidget(self.polarity_combo)
+        layout.addLayout(polarity_layout)
+
+        # Stop Bits Selection
+        stop_bits_layout = QHBoxLayout()
+        stop_bits_label = QLabel("Stop Bits:")
+        self.stop_bits_combo = QComboBox()
+        self.stop_bits_combo.addItems(['0', '1', '2', '3'])
+        self.stop_bits_combo.setCurrentText(str(self.current_config.get('stop_bits', 1)))
+        stop_bits_layout.addWidget(stop_bits_label)
+        stop_bits_layout.addWidget(self.stop_bits_combo)
+        layout.addLayout(stop_bits_layout)
+
+        # Data Format Selection
+        format_layout = QHBoxLayout()
+        format_label = QLabel("Data Format:")
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["Binary", "Decimal", "Hex", "ASCII"])
+        self.format_combo.setCurrentText(self.current_config.get('data_format', 'ASCII'))
+        format_layout.addWidget(format_label)
+        format_layout.addWidget(self.format_combo)
+        layout.addLayout(format_layout)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        cancel_button = QPushButton("Cancel")
+        ok_button.clicked.connect(self.accept)
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def get_configuration(self):
+        return {
+            'data_channel': self.data_combo.currentIndex() + 1,
+            'polarity': self.polarity_combo.currentText(),
+            'stop_bits': int(self.stop_bits_combo.currentText()),
+            'data_format': self.format_combo.currentText(),
+        }
 
 
 class FixedYViewBox(pg.ViewBox):
@@ -201,115 +322,6 @@ class FixedYViewBox(pg.ViewBox):
         super().translateBy(x=x, y=y)
 
 
-class EditableButton(QPushButton):
-    configure_requested = pyqtSignal(int)  # Signal to notify when configure is requested
-    reset_requested = pyqtSignal(int)      # Signal for reset
-
-    def __init__(self, label, idx, parent=None):
-        super().__init__(label, parent)
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.customContextMenuRequested.connect(self.show_context_menu)
-        self.default_label = label
-        self.idx = idx  # Index of the UART channel
-
-    def show_context_menu(self, position):
-        menu = QMenu()
-        rename_action = menu.addAction("Rename")
-        reset_action = menu.addAction("Reset to Default")
-        configure_action = menu.addAction("Configure")  # Add the Configure option
-        action = menu.exec(self.mapToGlobal(position))
-        if action == rename_action:
-            new_label, ok = QInputDialog.getText(
-                self, "Rename Button", "Enter new label:", text=self.text()
-            )
-            if ok and new_label:
-                self.setText(new_label)
-        elif action == reset_action:
-            self.setText(self.default_label)
-            self.reset_requested.emit(self.idx)  # Emit reset signal
-        elif action == configure_action:
-            self.configure_requested.emit(self.idx)  # Emit signal to open configuration dialog
-
-
-class UARTConfigDialog(QDialog):
-    def __init__(self, current_config, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("UART Configuration")
-        self.current_config = current_config  # Dictionary to hold current configurations
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout()
-
-        # Data Channel Selection
-        data_layout = QHBoxLayout()
-        data_label = QLabel("Data Channel:")
-        self.data_combo = QComboBox()
-        self.data_combo.addItems([f"Channel {i+1}" for i in range(8)])
-        self.data_combo.setCurrentIndex(self.current_config.get('data_channel', 1) - 1)
-        data_layout.addWidget(data_label)
-        data_layout.addWidget(self.data_combo)
-        layout.addLayout(data_layout)
-
-        # Polarity Selection
-        polarity_layout = QHBoxLayout()
-        polarity_label = QLabel("Polarity:")
-        self.polarity_group = QButtonGroup(self)
-        self.polarity_standard = QRadioButton("Standard")
-        self.polarity_inverted = QRadioButton("Inverted")
-        self.polarity_group.addButton(self.polarity_standard)
-        self.polarity_group.addButton(self.polarity_inverted)
-        polarity_layout.addWidget(polarity_label)
-        polarity_layout.addWidget(self.polarity_standard)
-        polarity_layout.addWidget(self.polarity_inverted)
-        layout.addLayout(polarity_layout)
-
-        if self.current_config.get('polarity', 'Standard') == 'Standard':
-            self.polarity_standard.setChecked(True)
-        else:
-            self.polarity_inverted.setChecked(True)
-
-        # Stop Bits Selection
-        stop_bits_layout = QHBoxLayout()
-        stop_bits_label = QLabel("Stop Bits:")
-        self.stop_bits_input = QLineEdit()
-        self.stop_bits_input.setValidator(QIntValidator(0, 3))
-        self.stop_bits_input.setText(str(self.current_config.get('stop_bits', 1)))
-        stop_bits_layout.addWidget(stop_bits_label)
-        stop_bits_layout.addWidget(self.stop_bits_input)
-        layout.addLayout(stop_bits_layout)
-
-        # Data Format Selection
-        format_layout = QHBoxLayout()
-        format_label = QLabel("Data Format:")
-        self.format_combo = QComboBox()
-        self.format_combo.addItems(["Binary", "Decimal", "Hexadecimal", "ASCII"])
-        self.format_combo.setCurrentText(self.current_config.get('data_format', 'Hexadecimal'))
-        format_layout.addWidget(format_label)
-        format_layout.addWidget(self.format_combo)
-        layout.addLayout(format_layout)
-
-        # Buttons
-        button_layout = QHBoxLayout()
-        ok_button = QPushButton("OK")
-        cancel_button = QPushButton("Cancel")
-        ok_button.clicked.connect(self.accept)
-        cancel_button.clicked.connect(self.reject)
-        button_layout.addWidget(ok_button)
-        button_layout.addWidget(cancel_button)
-        layout.addLayout(button_layout)
-
-        self.setLayout(layout)
-
-    def get_configuration(self):
-        return {
-            'data_channel': self.data_combo.currentIndex() + 1,
-            'polarity': 'Standard' if self.polarity_standard.isChecked() else 'Inverted',
-            'stop_bits': int(self.stop_bits_input.text()),
-            'data_format': self.format_combo.currentText(),
-        }
-
-
 class UARTDisplay(QWidget):
     def __init__(self, port, baudrate, bufferSize, channels=8):
         super().__init__()
@@ -317,8 +329,10 @@ class UARTDisplay(QWidget):
         self.baudrate = baudrate
         self.channels = channels
         self.bufferSize = bufferSize
+        self.bufferSize = bufferSize  # This will be updated in update_sample_rates
+        self.sample_rate = None  # Initialize sample_rate
 
-        self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]
+        self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]  # 8 channels
         self.sample_indices = deque(maxlen=self.bufferSize)
         self.total_samples = 0
 
@@ -327,26 +341,24 @@ class UARTDisplay(QWidget):
         self.current_trigger_modes = ['No Trigger'] * self.channels
         self.trigger_mode_options = ['No Trigger', 'Rising Edge', 'Falling Edge']
 
-        # Baud rate options
-        self.baud_rates = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880, 115200]
-        self.default_baud_rate = 9600  # Default baud rate
-        self.baud_rate = self.default_baud_rate  # Current baud rate
-
-        # Initialize UART configurations with default settings for each channel
-        self.uart_configs = []
-        for i in range(self.channels):
-            self.uart_configs.append({
+        # Initialize UART configurations with default settings per channel
+        self.uart_configs = [
+            {
                 'data_channel': i + 1,
                 'polarity': 'Standard',
                 'stop_bits': 1,
-                'data_format': 'Hexadecimal',
-                'enabled': False,  # Start with channels disabled
-            })
+                'data_format': 'ASCII',
+                'baud_rate': 9600,
+                'enabled': False,
+                'sample_rate': None,  # Will be calculated based on baud rate
+            } for i in range(self.channels)
+        ]
 
-        # Initialize decoded messages per channel
-        self.decoded_messages_per_channel = {i: [] for i in range(self.channels)}
+        # Default baud rates
+        self.available_baud_rates = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 74880, 115200]
+        self.selected_baud_rate = 9600  # Default baud rate
 
-        self.cursors_per_channel = [[] for _ in range(self.channels)]  # To store cursors per channel
+        self.uart_channel_enabled = [False] * self.channels  # Track which UART channels are enabled
 
         self.setup_ui()
         self.timer = QTimer()
@@ -354,17 +366,23 @@ class UARTDisplay(QWidget):
 
         self.is_reading = False
 
-        self.worker = SerialWorker(self.port, self.baudrate, channels=self.channels, uart_configs=self.uart_configs)
+        self.worker = UARTWorker(self.port, self.baudrate, channels=self.channels, uart_configs=self.uart_configs)
         self.worker.data_ready.connect(self.handle_data_value)
         self.worker.decoded_message_ready.connect(self.display_decoded_message)
         self.worker.start()
 
-        self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
-        self.curves = []
-        for i in range(self.channels):
-            curve = self.plot.plot(pen=pg.mkPen(color=self.colors[i % len(self.colors)], width=2))
+        # Create curves for each channel
+        self.channel_curves = []
+        for ch in range(self.channels):
+            curve = self.plot.plot(pen=pg.mkPen(color=self.colors[ch % len(self.colors)], width=2))
             curve.setVisible(False)
-            self.curves.append(curve)
+            self.channel_curves.append(curve)
+
+        # For displaying decoded messages
+        self.decoded_texts = []
+        self.decoded_messages_per_channel = [[] for _ in range(self.channels)]
+        
+        self.update_sample_rates()
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -373,16 +391,15 @@ class UARTDisplay(QWidget):
         main_layout.addLayout(plot_layout)
 
         self.graph_layout = pg.GraphicsLayoutWidget()
-        plot_layout.addWidget(self.graph_layout, stretch=3)
+        plot_layout.addWidget(self.graph_layout, stretch=3)  # Allocate more space to the graph
 
         self.plot = self.graph_layout.addPlot(viewBox=FixedYViewBox())
 
-        self.sample_rate = self.baud_rate * 16  # Default sample rate
-
-        self.plot.setXRange(0, self.bufferSize / self.sample_rate, padding=0)
-        self.plot.setLimits(xMin=0, xMax=self.bufferSize / self.sample_rate)
+        self.plot.setXRange(0, self.bufferSize / 1e6, padding=0)
+        self.plot.setLimits(xMin=0, xMax=self.bufferSize / 1e6)
         self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
-        self.plot.setYRange(-2, 2 * self.channels, padding=0)
+        self.plot.setYRange(-2, 2 * self.channels, padding=0)  # 8 channels
+        self.plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
         self.plot.enableAutoRange(axis=pg.ViewBox.YAxis, enable=False)
         self.plot.showGrid(x=True, y=True)
         self.plot.getAxis('left').setTicks([])
@@ -390,27 +407,29 @@ class UARTDisplay(QWidget):
         self.plot.getAxis('left').setPen(None)
         self.plot.setLabel('bottom', 'Time', units='s')
 
-        button_layout = QGridLayout()
-        plot_layout.addLayout(button_layout, stretch=1)
+        self.colors = ['#FF6EC7', '#39FF14', '#FF486D', '#BF00FF', '#FFFF33', '#FFA500', '#00F5FF', '#BFFF00']
 
-        button_widget = QWidget()
-        button_layout = QGridLayout(button_widget)
-        plot_layout.addWidget(button_widget)
+        button_layout = QGridLayout()
+        plot_layout.addLayout(button_layout, stretch=1)  # Allocate less space to the control panel
 
         self.channel_buttons = []
         self.trigger_mode_buttons = []
 
         for i in range(self.channels):
             row = i
-            label = f"UART {i+1}\nCh{self.uart_configs[i]['data_channel']}"
-            button = EditableButton(label, idx=i)
+            uart_config = self.uart_configs[i]
+            data_channel = uart_config['data_channel']
+            label = f"UART {i+1}\nCh{data_channel}"
+            button = UARTChannelButton(label, channel_idx=i)
+
+            # Set size policy and fixed width
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-            button.setFixedWidth(150)
+            button.setFixedWidth(100)  # Set the fixed width for the button
+
             button.setCheckable(True)
             button.setChecked(False)
             button.toggled.connect(lambda checked, idx=i: self.toggle_channel(idx, checked))
             button.configure_requested.connect(self.open_configuration_dialog)
-            button.reset_requested.connect(self.reset_channel_to_default)
             button_layout.addWidget(button, row, 0)
 
             # Trigger Mode Button
@@ -423,17 +442,18 @@ class UARTDisplay(QWidget):
             self.channel_buttons.append(button)
             self.trigger_mode_buttons.append(trigger_button)
 
-        # Baud Rate Selection
-        self.baud_rate_label = QLabel("Baud Rate:")
-        button_layout.addWidget(self.baud_rate_label, self.channels, 0)
+            button.reset_requested.connect(self.reset_channel_to_default)
 
+        # Baud Rate Selection
+        baud_rate_layout = QHBoxLayout()
+        baud_rate_label = QLabel("Baud Rate:")
         self.baud_rate_combo = QComboBox()
-        self.baud_rate_combo.addItems([str(br) for br in self.baud_rates])
-        self.baud_rate_combo.setCurrentText(str(self.default_baud_rate))
-        self.baud_rate_combo.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-        self.baud_rate_combo.setFixedWidth(100)
-        button_layout.addWidget(self.baud_rate_combo, self.channels, 1)
-        self.baud_rate_combo.currentIndexChanged.connect(self.handle_baud_rate_change)
+        self.baud_rate_combo.addItems([str(br) for br in self.available_baud_rates])
+        self.baud_rate_combo.setCurrentText("9600")
+        baud_rate_layout.addWidget(baud_rate_label)
+        baud_rate_layout.addWidget(self.baud_rate_combo)
+        baud_rate_layout.addStretch()
+        main_layout.addLayout(baud_rate_layout)
 
         # Control buttons layout
         control_buttons_layout = QHBoxLayout()
@@ -450,15 +470,25 @@ class UARTDisplay(QWidget):
         self.single_button.clicked.connect(self.start_single_capture)
         control_buttons_layout.addWidget(self.single_button)
 
-        # Add control buttons layout to the button_layout
-        button_layout.addLayout(control_buttons_layout, self.channels + 1, 0, 1, 2)
+        main_layout.addLayout(control_buttons_layout)
 
-        # Adjust the stretch factors of the plot_layout
-        plot_layout.setStretchFactor(self.graph_layout, 1)
-        plot_layout.setStretchFactor(button_widget, 0)
+    def toggle_channel(self, channel_idx, is_checked):
+        self.uart_channel_enabled[channel_idx] = is_checked  # Update the enabled list
+        self.uart_configs[channel_idx]['enabled'] = is_checked
 
-        # Initialize other components
-        self.channel_visibility = [False] * self.channels
+        # Update curve visibility
+        curve = self.channel_curves[channel_idx]
+        curve.setVisible(is_checked)
+
+        button = self.channel_buttons[channel_idx]
+        if is_checked:
+            color = self.colors[channel_idx % len(self.colors)]
+            text_color = 'black' if self.is_light_color(color) else 'white'
+            button.setStyleSheet(f"QPushButton {{ background-color: {color}; color: {text_color}; "
+                                 f"border: 1px solid #555; border-radius: 5px; padding: 5px; "
+                                 f"text-align: left; }}")
+        else:
+            button.setStyleSheet("")
 
     def is_light_color(self, hex_color):
         hex_color = hex_color.lstrip('#')
@@ -466,84 +496,160 @@ class UARTDisplay(QWidget):
         luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
         return luminance > 0.5
 
-    def reset_channel_to_default(self, idx):
+    def reset_channel_to_default(self, channel_idx):
         # Reset the channel configuration to default settings
         default_config = {
-            'data_channel': idx + 1,
+            'data_channel': channel_idx + 1,
             'polarity': 'Standard',
             'stop_bits': 1,
-            'data_format': 'Hexadecimal',
+            'data_format': 'ASCII',
+            'baud_rate': 9600,
             'enabled': False,
+            'sample_rate': None,
         }
-        self.uart_configs[idx] = default_config
-        print(f"Channel {idx+1} reset to default configuration: {default_config}")
+        self.uart_configs[channel_idx] = default_config
+        print(f"Channel {channel_idx+1} reset to default configuration: {default_config}")
 
         # Reset the button's label to default
-        self.channel_buttons[idx].setText(self.channel_buttons[idx].default_label)
+        self.channel_buttons[channel_idx].setText(self.channel_buttons[channel_idx].default_label)
 
         # Update trigger mode button
-        self.current_trigger_modes[idx] = 'No Trigger'
-        self.trigger_mode_buttons[idx].setText(f"Trigger - {self.current_trigger_modes[idx]}")
+        self.current_trigger_modes[channel_idx] = 'No Trigger'
+        self.trigger_mode_buttons[channel_idx].setText(f"Trigger - {self.current_trigger_modes[channel_idx]}")
 
-        # Update worker's UART configurations
-        self.worker.uart_configs[idx] = self.uart_configs[idx]
+        # Update worker's uart configurations
+        self.worker.uart_configs[channel_idx] = default_config
 
-        # Update curve visibility and color
-        is_checked = self.channel_visibility[idx]
-        curve = self.curves[idx]
+        # Update curves visibility and colors
+        is_checked = self.uart_channel_enabled[channel_idx]
+        curve = self.channel_curves[channel_idx]
         curve.setVisible(is_checked)
-        curve.setPen(pg.mkPen(color=self.colors[idx % len(self.colors)], width=2))
+        curve.setPen(pg.mkPen(color=self.colors[channel_idx % len(self.colors)], width=2))
 
         # Clear data buffers
         self.clear_data_buffers()
 
         # Reset button style to default
-        self.channel_buttons[idx].setStyleSheet("")
+        self.channel_buttons[channel_idx].setStyleSheet("")
 
-        print(f"Channel {idx+1} has been reset to default settings.")
+        print(f"Channel {channel_idx+1} has been reset to default settings.")
 
-    def handle_baud_rate_change(self):
-        baud_rate_str = self.baud_rate_combo.currentText()
+    def open_configuration_dialog(self, channel_idx):
+        current_config = self.uart_configs[channel_idx]
+        dialog = UARTConfigDialog(current_config, parent=self)
+        if dialog.exec():
+            new_config = dialog.get_configuration()
+            self.uart_configs[channel_idx].update(new_config)
+            print(f"Configuration for channel {channel_idx+1} updated: {new_config}")
+            # Update label on the button to reflect new channel assignment
+            data_channel = new_config['data_channel']
+            label = f"UART {channel_idx+1}\nCh{data_channel}"
+            self.channel_buttons[channel_idx].setText(label)
+            # Update trigger mode button
+            self.trigger_mode_buttons[channel_idx].setText(f"Trigger - {self.current_trigger_modes[channel_idx]}")
+            # Update curves visibility
+            is_checked = self.uart_channel_enabled[channel_idx]
+            curve = self.channel_curves[channel_idx]
+            curve.setVisible(is_checked)
+            # Clear data buffers
+            self.clear_data_buffers()
+            # Update worker's uart configurations
+            self.worker.uart_configs = self.uart_configs
+
+    def toggle_trigger_mode(self, channel_idx):
+        # Cycle through trigger modes
+        current_mode = self.current_trigger_modes[channel_idx]
+        current_mode_idx = self.trigger_mode_options.index(current_mode)
+        new_mode_idx = (current_mode_idx + 1) % len(self.trigger_mode_options)
+        new_mode = self.trigger_mode_options[new_mode_idx]
+        self.current_trigger_modes[channel_idx] = new_mode
+        self.trigger_mode_buttons[channel_idx].setText(f"Trigger - {new_mode}")
+        self.worker.set_trigger_mode(channel_idx, new_mode)
+        # Send trigger configuration to MCU
+        self.send_trigger_edge_command()
+        self.send_trigger_pins_command()
+
+    def send_trigger_edge_command(self):
+        command_int = get_trigger_edge_command(self.current_trigger_modes)
+        command_str = str(command_int)
         try:
-            self.baud_rate = int(baud_rate_str)
-            # Set sampling frequency to baud_rate * 16
-            self.sample_rate = self.baud_rate * 16
-            print(f"Baud Rate set to {self.baud_rate} bps, Sample Rate set to {self.sample_rate} Hz")
-            # Update the sample timer or any other necessary configurations
-            period = (72 * 10**6) / self.sample_rate
-            self.updateSampleTimer(int(period))
-            self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
-            self.plot.setLimits(xMin=0, xMax=self.bufferSize / self.sample_rate)
-        except ValueError as e:
-            print(f"Invalid baud rate: {e}")
+            self.worker.serial.write(b'2')
+            time.sleep(0.01)
+            self.worker.serial.write(b'0')
+            time.sleep(0.01)
+            self.worker.serial.write(command_str.encode('utf-8'))
+            time.sleep(0.01)
+        except serial.SerialException as e:
+            print(f"Failed to send trigger edge command: {str(e)}")
 
-    def updateSampleTimer(self, period):
-        self.period = period
+    def send_trigger_pins_command(self):
+        command_int = get_trigger_pins_command(self.current_trigger_modes)
+        command_str = str(command_int)
         try:
-            self.worker.serial.write(b'5')
+            self.worker.serial.write(b'3')
             time.sleep(0.001)
-            # Send first byte
-            selected_bits = (period >> 24) & 0xFF
-            self.worker.serial.write(str(selected_bits).encode('utf-8'))
+            self.worker.serial.write(b'0')
             time.sleep(0.001)
-            # Send second byte
-            selected_bits = (period >> 16) & 0xFF
-            self.worker.serial.write(str(selected_bits).encode('utf-8'))
-            time.sleep(0.001)
-            self.worker.serial.write(b'6')
-            time.sleep(0.001)
-            # Send third byte
-            selected_bits = (period >> 8) & 0xFF
-            self.worker.serial.write(str(selected_bits).encode('utf-8'))
-            time.sleep(0.001)
-            # Send fourth byte
-            selected_bits = period & 0xFF
-            self.worker.serial.write(str(selected_bits).encode('utf-8'))
-            time.sleep(0.001)
-        except Exception as e:
-            print(f"Failed to update sample timer: {e}")
+            self.worker.serial.write(command_str.encode('utf-8'))
+        except serial.SerialException as e:
+            print(f"Failed to send trigger pins command: {str(e)}")
+
+    def handle_data_value(self, data_value, sample_idx):
+        if self.is_reading:
+            # Store raw data for plotting
+            for i in range(self.channels):
+                bit = (data_value >> i) & 1
+                self.data_buffer[i].append(bit)
+            self.total_samples += 1  # Increment total samples
+
+            # Check if buffers are full
+            if all(len(buf) >= self.bufferSize for buf in self.data_buffer):
+                if self.is_single_capture:
+                    # In single capture mode, stop acquisition
+                    self.stop_single_capture()
+                else:
+                    # In continuous mode, reset buffers
+                    self.clear_data_buffers()
+                    # Optionally clear decoded messages
+
+    def display_decoded_message(self, decoded_data):
+        channel = decoded_data['channel']
+        if not self.uart_channel_enabled[channel]:
+            return  # Do not display if the channel is not enabled
+        data_format = decoded_data.get('data_format', 'ASCII')
+        data_byte = decoded_data.get('data')
+        sample_idx = decoded_data.get('sample_idx')
+
+        # Convert data_byte to desired format
+        if data_format == 'Binary':
+            data_str = bin(data_byte)
+        elif data_format == 'Decimal':
+            data_str = str(data_byte)
+        elif data_format == 'Hex':
+            data_str = hex(data_byte)
+        elif data_format == 'ASCII':
+            try:
+                data_str = chr(data_byte)
+            except ValueError:
+                data_str = '?'
+        else:
+            data_str = str(data_byte)
+
+        # Append to decoded messages
+        self.decoded_messages_per_channel[channel].append(data_str)
+
+        # Optionally, display on GUI or print to console
+        print(f"Channel {channel + 1} Decoded Data: {data_str}")
+
+    def clear_data_buffers(self):
+        self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]
+        self.total_samples = 0  # Reset total samples
+
+        # Reset worker's decoding states
+        self.worker.reset_decoding_states()
 
     def toggle_reading(self):
+        # Similar to I2CDisplay's toggle_reading
         if self.is_reading:
             self.send_stop_message()
             self.stop_reading()
@@ -557,6 +663,8 @@ class UARTDisplay(QWidget):
             self.toggle_button.setText("Running")
             self.single_button.setEnabled(True)
             self.toggle_button.setStyleSheet("background-color: #00FF77; color: black;")
+            # Update sample rates based on baud rate
+            self.update_sample_rates()
 
     def send_start_message(self):
         if self.worker.serial.is_open:
@@ -588,8 +696,11 @@ class UARTDisplay(QWidget):
 
     def start_reading(self):
         if not self.is_reading:
+            # Update sample rates based on baud rate
+            self.update_sample_rates()
             self.is_reading = True
             self.timer.start(1)
+
 
     def stop_reading(self):
         if self.is_reading:
@@ -600,11 +711,14 @@ class UARTDisplay(QWidget):
         if not self.is_reading:
             self.clear_data_buffers()
             self.is_single_capture = True
+            # Update sample rates based on baud rate
+            self.update_sample_rates()
             self.send_start_message()
             self.start_reading()
             self.single_button.setEnabled(False)
             self.toggle_button.setEnabled(False)
             self.single_button.setStyleSheet("background-color: #00FF77; color: black;")
+
 
     def stop_single_capture(self):
         self.is_single_capture = False
@@ -615,216 +729,101 @@ class UARTDisplay(QWidget):
         self.toggle_button.setText("Start")
         self.single_button.setStyleSheet("")
 
-    def clear_data_buffers(self):
-        self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]
-        self.total_samples = 0  # Reset total samples
-
-        # Remove all cursors
-        for idx in range(self.channels):
-            for cursor_info in self.cursors_per_channel[idx]:
-                self.plot.removeItem(cursor_info['line'])
-                self.plot.removeItem(cursor_info['label'])
-            self.cursors_per_channel[idx] = []
-
-        # Reset worker's decoding states
-        self.worker.reset_decoding_states()
-
-    def handle_data_value(self, data_value, sample_idx):
-        if self.is_reading:
-            # Store raw data for plotting
-            for i in range(self.channels):
-                bit = (data_value >> i) & 1
-                self.data_buffer[i].append(bit)
-            self.total_samples += 1  # Increment total samples
-
-            # Check if buffers are full
-            if all(len(buf) >= self.bufferSize for buf in self.data_buffer):
-                if self.is_single_capture:
-                    # In single capture mode, stop acquisition
-                    self.stop_single_capture()
-                else:
-                    # In continuous mode, reset buffers and cursors
-                    self.clear_data_buffers()
-                    self.clear_decoded_text()
-
-    def clear_decoded_text(self):
-        # Clear all decoded messages per channel
-        for idx in range(self.channels):
-            self.decoded_messages_per_channel[idx] = []
-        # Cursors are already cleared in clear_data_buffers
-
-    def display_decoded_message(self, decoded_data):
-        uart_idx = decoded_data['uart_idx']
-        if not self.channel_visibility[uart_idx]:
-            return  # Do not display if the channel is not enabled
-        data_format = self.uart_configs[uart_idx].get('data_format', 'Hexadecimal')
-        event = decoded_data.get('event', None)
-        sample_idx = decoded_data.get('sample_idx', None)
-
-        if event == 'DATA':
-            data_str = decoded_data.get('data', '')
-            label_text = f"Data: {data_str}"
-            self.create_cursor(uart_idx, sample_idx, label_text)
-
-    def create_cursor(self, uart_idx, sample_idx, label_text):
-        # Cursor color
-        cursor_color = '#00F5FF'
-
-        # Calculate y-position above the data signal
-        y_position = uart_idx * 2 + 1  # Adjust as needed
-
-        x = 0  # Initial x position, will be updated in update_plot
-
-        # Create line data
-        line = pg.PlotDataItem([x, x], [y_position, y_position + 1], pen=pg.mkPen(color=cursor_color, width=2))
-        self.plot.addItem(line)
-        # Add a label
-        label = pg.TextItem(text=label_text, anchor=(0.5, 1.0), color=cursor_color)
-        font = QFont("Arial", 12)
-        label.setFont(font)
-        self.plot.addItem(label)
-        # Store the line, label, and sample index
-        self.cursors_per_channel[uart_idx].append({
-            'line': line,
-            'label': label,
-            'sample_idx': sample_idx,
-            'y_position': y_position,
-        })
-
     def update_plot(self):
-        num_samples = len(self.data_buffer[0])
-        if num_samples > 1:
-            t = np.arange(num_samples) / self.sample_rate
+        # Update the plots for each channel
+        for ch in range(self.channels):
+            if self.uart_channel_enabled[ch]:
+                data = list(self.data_buffer[ch])
+                num_samples = len(data)
+                if num_samples > 1:
+                    sample_rate = self.sample_rate  # Use the stored sample rate
+                    t = np.arange(num_samples) / sample_rate
+                    base_level = ch * 2  # Adjust as needed
 
-            for i in range(self.channels):
-                if self.channel_visibility[i]:
-                    data = list(self.data_buffer[i])
-                    # Prepare data for plotting
+                    # Prepare square wave data
                     square_wave_time = []
                     square_wave_data = []
                     for j in range(1, num_samples):
                         square_wave_time.extend([t[j - 1], t[j]])
-                        level = data[j - 1] + i * 2  # Offset per channel
+                        level = data[j - 1] + base_level
                         square_wave_data.extend([level, level])
                         if data[j] != data[j - 1]:
                             square_wave_time.append(t[j])
-                            level = data[j] + i * 2
+                            level = data[j] + base_level
                             square_wave_data.append(level)
-                    self.curves[i].setData(square_wave_time, square_wave_data)
+                    self.channel_curves[ch].setData(square_wave_time, square_wave_data)
                 else:
-                    self.curves[i].setVisible(False)
+                    self.channel_curves[ch].setData([], [])
+            else:
+                self.channel_curves[ch].setVisible(False)
 
-                # --- Update Cursors ---
-                cursors_to_remove = []
-                for cursor_info in self.cursors_per_channel[i]:
-                    sample_idx = cursor_info['sample_idx']
-                    idx_in_buffer = sample_idx - (self.total_samples - num_samples)
-                    if 0 <= idx_in_buffer < num_samples:
-                        cursor_time = t[int(idx_in_buffer)]
-                        # Update the line position
-                        x = cursor_time
-                        y_position = cursor_info['y_position']
-                        cursor_info['line'].setData([x, x], [y_position, y_position + 1])
-                        # Update the label position
-                        label_offset_x = (t[1] - t[0]) * 5  # Adjust label offset as needed
-                        cursor_info['label'].setPos(x + label_offset_x, y_position)
-                        cursor_info['x_pos'] = x + label_offset_x  # Store x position for overlap checking
-                    else:
-                        # Cursor is no longer in the buffer, remove it
-                        self.plot.removeItem(cursor_info['line'])
-                        self.plot.removeItem(cursor_info['label'])
-                        cursors_to_remove.append(cursor_info)
-                # Remove cursors that are no longer in buffer
-                for cursor_info in cursors_to_remove:
-                    self.cursors_per_channel[i].remove(cursor_info)
-        else:
-            # Clear the curves if no data
-            for curve in self.curves:
-                curve.setData([], [])
+    def update_sample_rates(self):
+        # Calculate sample rate based on selected baud rate to see at least 40 bytes
+        baud_rate = int(self.baud_rate_combo.currentText())
+        desired_bytes = 40  # We want to capture at least 40 bytes
+        bits_per_byte = 10  # 8 data bits + 1 start bit + 1 stop bit
+        samples_per_bit = 16  # As per your requirement
+        samples_per_byte = bits_per_byte * samples_per_bit  # Total samples per byte
+
+        total_samples_needed = desired_bytes * samples_per_byte
+
+        # Adjust bufferSize accordingly
+        self.bufferSize = total_samples_needed
+        self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]
+
+        # Update the plot's X range based on new bufferSize and sample_rate
+        sample_rate = baud_rate * samples_per_bit
+        total_time = self.bufferSize / sample_rate  # Total time span of the buffer
+
+        self.plot.setXRange(0, total_time, padding=0)
+        self.plot.setLimits(xMin=0, xMax=total_time)
+
+        # Update sample_rate and baud_rate in uart_configs
+        for ch in range(self.channels):
+            if self.uart_channel_enabled[ch]:
+                self.uart_configs[ch]['sample_rate'] = sample_rate
+                self.worker.set_sample_rate(ch, sample_rate)
+                self.uart_configs[ch]['baud_rate'] = baud_rate
+                self.worker.set_baud_rate(ch, baud_rate)
+
+        # Send sampling rate to MCU
+        self.send_sample_rate_to_mcu(sample_rate)
+
+        # Store sample_rate for use in plotting
+        self.sample_rate = sample_rate
+
+    def send_sample_rate_to_mcu(self, sample_rate):
+        # Convert sample_rate to period for the MCU
+        period = int((72e6) / sample_rate)
+        if period < 1:
+            period = 1  # Ensure period is at least 1 to prevent division by zero
+        try:
+            self.worker.serial.write(b'5')
+            time.sleep(0.001)
+            # Send first byte
+            selected_bits = (period >> 24) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
+            time.sleep(0.001)
+            # Send second byte
+            selected_bits = (period >> 16) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
+            time.sleep(0.001)
+            self.worker.serial.write(b'6')
+            time.sleep(0.001)
+            # Send third byte
+            selected_bits = (period >> 8) & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
+            time.sleep(0.001)
+            # Send fourth byte
+            selected_bits = period & 0xFF
+            self.worker.serial.write(str(selected_bits).encode('utf-8'))
+            time.sleep(0.001)
+        except Exception as e:
+            print(f"Failed to send sample rate to MCU: {e}")
+
 
     def closeEvent(self, event):
         self.worker.stop_worker()
         self.worker.quit()
         self.worker.wait()
         event.accept()
-
-    def open_configuration_dialog(self, idx):
-        current_config = self.uart_configs[idx]
-        dialog = UARTConfigDialog(current_config, parent=self)
-        if dialog.exec():
-            new_config = dialog.get_configuration()
-            self.uart_configs[idx].update(new_config)
-            self.uart_configs[idx]['enabled'] = self.channel_visibility[idx]
-            print(f"UART configuration for channel {idx+1} updated: {new_config}")
-            # Update the button label
-            self.channel_buttons[idx].setText(f"UART {idx+1}\nCh{self.uart_configs[idx]['data_channel']}")
-            # Update worker's UART configuration
-            self.worker.uart_configs[idx] = self.uart_configs[idx]
-            # Clear data buffers if necessary
-            self.clear_data_buffers()
-
-    def toggle_channel(self, idx, is_checked):
-        self.channel_visibility[idx] = is_checked  # Update the visibility list
-        self.uart_configs[idx]['enabled'] = is_checked  # Update the enabled status in config
-
-        # Update curve visibility
-        curve = self.curves[idx]
-        curve.setVisible(is_checked)
-
-        button = self.channel_buttons[idx]
-        if is_checked:
-            color = self.colors[idx % len(self.colors)]
-            text_color = 'black' if self.is_light_color(color) else 'white'
-            button.setStyleSheet(f"QPushButton {{ background-color: {color}; color: {text_color}; "
-                                f"border: 1px solid #555; border-radius: 5px; padding: 5px; "
-                                f"text-align: left; }}")
-        else:
-            button.setStyleSheet("")
-
-    def toggle_trigger_mode(self, idx):
-        # Cycle through trigger modes
-        current_mode = self.current_trigger_modes[idx]
-        current_mode_idx = self.trigger_mode_options.index(current_mode)
-        new_mode_idx = (current_mode_idx + 1) % len(self.trigger_mode_options)
-        new_mode = self.trigger_mode_options[new_mode_idx]
-        self.current_trigger_modes[idx] = new_mode
-        self.trigger_mode_buttons[idx].setText(f"Trigger - {new_mode}")
-        self.worker.set_trigger_mode(idx, new_mode)
-        self.send_trigger_edge_command()
-        self.send_trigger_pins_command()
-
-    def send_trigger_edge_command(self):
-        command_int = get_trigger_edge_command(self.current_trigger_modes)
-        command_str = str(command_int)
-        try:
-            self.worker.serial.write(b'2')
-            time.sleep(0.01)
-            self.worker.serial.write(b'0')
-            time.sleep(0.01)
-            self.worker.serial.write(command_str.encode('utf-8'))
-            time.sleep(0.01)
-        except serial.SerialException as e:
-            print(f"Failed to send trigger edge command: {str(e)}")
-
-    def send_trigger_pins_command(self):
-        command_int = get_trigger_pins_command(self.current_trigger_modes)
-        command_str = str(command_int)
-        try:
-            self.worker.serial.write(b'3')
-            time.sleep(0.001)
-            self.worker.serial.write(b'0')
-            time.sleep(0.001)
-            self.worker.serial.write(command_str.encode('utf-8'))
-        except serial.SerialException as e:
-            print(f"Failed to send trigger pins command: {str(e)}")
-
-
-if __name__ == '__main__':
-    from PyQt6.QtWidgets import QApplication
-    app = QApplication(sys.argv)
-    port = 'COM3'  # Replace with your serial port
-    baudrate = 115200  # Replace with your serial port baud rate
-    bufferSize = 1024
-    uart_display = UARTDisplay(port, baudrate, bufferSize)
-    uart_display.show()
-    sys.exit(app.exec())
