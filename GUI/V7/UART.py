@@ -109,7 +109,8 @@ class UARTWorker(QThread):
                 continue  # Cannot decode without sample rate and baud rate
 
             # Calculate number of samples per bit
-            samples_per_bit = sample_rate / baud_rate
+            # samples_per_bit = sample_rate / baud_rate
+            samples_per_bit = 16
 
             # State machine for UART decoding
             state = self.states[ch]
@@ -329,7 +330,6 @@ class UARTDisplay(QWidget):
         self.baudrate = baudrate
         self.channels = channels
         self.bufferSize = bufferSize
-        self.bufferSize = bufferSize  # This will be updated in update_sample_rates
         self.sample_rate = None  # Initialize sample_rate
 
         self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]  # 8 channels
@@ -762,7 +762,7 @@ class UARTDisplay(QWidget):
         baud_rate = int(self.baud_rate_combo.currentText())
         desired_bytes = 40  # We want to capture at least 40 bytes
         bits_per_byte = 10  # 8 data bits + 1 start bit + 1 stop bit
-        samples_per_bit = 16  # As per your requirement
+        samples_per_bit = 16  # Less chance for an error
         samples_per_byte = bits_per_byte * samples_per_bit  # Total samples per byte
 
         total_samples_needed = desired_bytes * samples_per_byte
@@ -772,25 +772,29 @@ class UARTDisplay(QWidget):
         self.data_buffer = [deque(maxlen=self.bufferSize) for _ in range(self.channels)]
 
         # Update the plot's X range based on new bufferSize and sample_rate
-        sample_rate = baud_rate * samples_per_bit
-        total_time = self.bufferSize / sample_rate  # Total time span of the buffer
+        # sample_rate = baud_rate * samples_per_bit
+        self.sample_rate = baud_rate * samples_per_bit
+        total_time = self.bufferSize / self.sample_rate  # Total time span of the buffer
 
-        self.plot.setXRange(0, total_time, padding=0)
-        self.plot.setLimits(xMin=0, xMax=total_time)
+        # self.plot.setXRange(0, total_time, padding=0)
+        # self.plot.setLimits(xMin=0, xMax=total_time)
+        
+        self.plot.setXRange(0, 200 / self.sample_rate, padding=0)
+        self.plot.setLimits(xMin=0, xMax=self.bufferSize / self.sample_rate)
 
         # Update sample_rate and baud_rate in uart_configs
         for ch in range(self.channels):
             if self.uart_channel_enabled[ch]:
-                self.uart_configs[ch]['sample_rate'] = sample_rate
-                self.worker.set_sample_rate(ch, sample_rate)
+                self.uart_configs[ch]['sample_rate'] = self.sample_rate
+                self.worker.set_sample_rate(ch, self.sample_rate)
                 self.uart_configs[ch]['baud_rate'] = baud_rate
                 self.worker.set_baud_rate(ch, baud_rate)
 
         # Send sampling rate to MCU
-        self.send_sample_rate_to_mcu(sample_rate)
+        self.send_sample_rate_to_mcu(self.sample_rate)
 
         # Store sample_rate for use in plotting
-        self.sample_rate = sample_rate
+        # self.sample_rate = sample_rate
 
     def send_sample_rate_to_mcu(self, sample_rate):
         # Convert sample_rate to period for the MCU
